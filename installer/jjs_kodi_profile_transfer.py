@@ -1430,7 +1430,12 @@ class TransferApp(tk.Tk):
             raise TransferError("LibreELEC update requires a local .tar file.")
         self._upload_libreelec_update(path, info)
 
-    def _configure_fresh_android_kodi_permissions(self, serial: str, package: str) -> None:
+    def _configure_fresh_android_kodi_permissions(
+        self,
+        serial: str,
+        package: str,
+        android_version: str,
+    ) -> None:
         """Grant Kodi's required Android permissions after a fresh installation."""
         self.log(f"Configuring persistent Android permissions for {package} …")
 
@@ -1475,10 +1480,36 @@ class TransferApp(tk.Tk):
             "ignore",
             timeout=30,
         )
-        if auto_revoke.returncode != 0:
+        try:
+            android_major = int((android_version or "0").split(".", 1)[0])
+        except ValueError:
+            android_major = 0
+
+        auto_revoke_ok = auto_revoke.returncode == 0
+        if auto_revoke_ok:
+            auto_revoke_check = self._adb(
+                serial,
+                "shell",
+                "appops",
+                "get",
+                package,
+                "AUTO_REVOKE_PERMISSIONS_IF_UNUSED",
+                timeout=30,
+            )
+            auto_revoke_text = (auto_revoke_check.stdout or "").lower()
+            auto_revoke_ok = (
+                auto_revoke_check.returncode == 0
+                and "ignore" in auto_revoke_text
+            )
+
+        if android_major >= 11 and not auto_revoke_ok:
+            failures.append(
+                'Android "remove permissions if app is unused" could not be disabled'
+            )
+        elif not auto_revoke_ok:
             self.log(
-                "Note: Android did not accept AUTO_REVOKE_PERMISSIONS_IF_UNUSED. "
-                "This Android version/device may not expose that app-op."
+                "Note: This Android version/device does not expose "
+                "AUTO_REVOKE_PERMISSIONS_IF_UNUSED."
             )
 
         dump = self._adb(serial, "shell", "dumpsys", "package", package, timeout=30)
@@ -1514,7 +1545,7 @@ class TransferApp(tk.Tk):
             )
 
         self.log("Android permissions OK: microphone + all files.")
-        if auto_revoke.returncode == 0:
+        if auto_revoke_ok:
             self.log("Android unused-app permission revocation disabled for this Kodi package.")
 
     def _install_android_apk(self, path: Path, info: dict) -> None:
@@ -1566,6 +1597,7 @@ class TransferApp(tk.Tk):
             self._configure_fresh_android_kodi_permissions(
                 info["serial"],
                 p["identifier"],
+                info.get("android", ""),
             )
             result = f"Installed {p['name']} {p.get('version', '')}".strip()
         elif len(changed_packages) == 1:
