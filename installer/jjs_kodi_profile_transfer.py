@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""JJS KODI Profile Backup/Restore & Transfer - Windows GUI.
+"""JJS KODI Profile Backup/Restore, Transfer & Install - Windows GUI.
 
-Built from the proven JJS Kodi installer 0.4 transport/backup code, but deliberately
-separated from APK installation. The tool backs up complete Kodi profiles and can
-restore them to another Kodi installation on Android (ADB) or LibreELEC (SSH).
+The tool backs up, restores, and transfers complete Kodi profiles between Android
+(ADB) and LibreELEC (SSH). It can also install or update a local Kodi APK on Android,
+uninstall a selected Android Kodi package, and stage a local LibreELEC update TAR.
 
 Backup files are uncompressed TAR archives. New backups contain transfer metadata.
 On cross-platform or cross-architecture restore, platform-specific binary add-ons
@@ -45,8 +45,8 @@ except ImportError:
     paramiko = None
 
 
-APP_TITLE = "JJS KODI Profile Backup/Restore & Transfer"
-APP_VERSION = "1.10"
+APP_TITLE = "JJS KODI Profile Backup/Restore, Transfer & Install"
+APP_VERSION = "1.11"
 META_NAME = "JJS_PROFILE_TRANSFER.json"
 
 DEFAULT_ADB_PORT = 5555
@@ -218,7 +218,10 @@ class TransferApp(tk.Tk):
         self._endpoint_profiles: dict[str, dict[str, dict]] = {"source": {}, "target": {}}
         self._endpoint_vars: dict[str, dict[str, tk.Variable]] = {}
         self._endpoint_widgets: dict[str, dict[str, object]] = {}
+        self._install_profile_map: dict[str, dict] = {}
         self._action_buttons: list[ttk.Button] = []
+        self._progress_bars: list[ttk.Progressbar] = []
+        self._log_widgets: list[tk.Text] = []
 
         self._load_config()
         self._build_ui()
@@ -238,6 +241,8 @@ class TransferApp(tk.Tk):
             "backup_dir": self.backup_dir_var.get().strip(),
             "backup_file": self.backup_file_var.get().strip(),
             "safety_backup": bool(self.safety_backup_var.get()),
+            "install_file": self.install_file_var.get().strip(),
+            "uninstall_backup": bool(self.uninstall_backup_var.get()),
         }
         for role in ("source", "target"):
             v = self._endpoint_vars.get(role, {})
@@ -249,6 +254,16 @@ class TransferApp(tk.Tk):
                     "user": str(v["user"].get()).strip(),
                     "profile": str(v["profile"].get()).strip(),
                 }
+
+        v = self._endpoint_vars.get("install", {})
+        if v:
+            cfg["install"] = {
+                "type": str(v["type"].get()),
+                "ip": str(v["ip"].get()).strip(),
+                "port": str(v["port"].get()).strip(),
+                "user": str(v["user"].get()).strip(),
+            }
+
         try:
             config_path().write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
         except Exception:
@@ -262,9 +277,28 @@ class TransferApp(tk.Tk):
         ttk.Label(outer, text=APP_TITLE, font=("Segoe UI", 16, "bold")).pack(anchor="w")
         ttk.Label(
             outer,
-            text="Back up, restore, and transfer complete Kodi profiles between Android/ADB and LibreELEC/SSH.",
+            text="Manage Kodi profiles and install or update Kodi on Android/ADB and LibreELEC/SSH.",
         ).pack(anchor="w", pady=(2, 10))
 
+        self.adb_dir_var = tk.StringVar(value=str(self._cfg.get("adb_dir", DEFAULT_ADB_DIR)))
+        self.backup_dir_var = tk.StringVar(value=str(self._cfg.get("backup_dir", default_backup_dir())))
+        self.backup_file_var = tk.StringVar(value=str(self._cfg.get("backup_file", "")))
+        self.safety_backup_var = tk.BooleanVar(value=bool(self._cfg.get("safety_backup", True)))
+        self.install_file_var = tk.StringVar(value=str(self._cfg.get("install_file", "")))
+        self.uninstall_backup_var = tk.BooleanVar(value=bool(self._cfg.get("uninstall_backup", True)))
+
+        notebook = ttk.Notebook(outer)
+        notebook.pack(fill="both", expand=True)
+
+        profile_tab = ttk.Frame(notebook, padding=10)
+        install_tab = ttk.Frame(notebook, padding=10)
+        notebook.add(profile_tab, text="Profile Backup / Restore / Transfer")
+        notebook.add(install_tab, text="Kodi Install / Update")
+
+        self._build_profile_tab(profile_tab)
+        self._build_install_tab(install_tab)
+
+    def _build_profile_tab(self, outer) -> None:
         endpoints = ttk.Frame(outer)
         endpoints.pack(fill="x")
         endpoints.columnconfigure(0, weight=1)
@@ -276,11 +310,6 @@ class TransferApp(tk.Tk):
         options = ttk.LabelFrame(outer, text="Backup", padding=10)
         options.pack(fill="x", pady=(10, 0))
         options.columnconfigure(1, weight=1)
-
-        self.adb_dir_var = tk.StringVar(value=str(self._cfg.get("adb_dir", DEFAULT_ADB_DIR)))
-        self.backup_dir_var = tk.StringVar(value=str(self._cfg.get("backup_dir", default_backup_dir())))
-        self.backup_file_var = tk.StringVar(value=str(self._cfg.get("backup_file", "")))
-        self.safety_backup_var = tk.BooleanVar(value=bool(self._cfg.get("safety_backup", True)))
 
         self._path_row(options, 0, "ADB folder:", self.adb_dir_var, self._browse_adb_dir)
         self._path_row(options, 1, "Backup destination:", self.backup_dir_var, self._browse_backup_dir)
@@ -305,8 +334,9 @@ class TransferApp(tk.Tk):
             b.pack(side="left", padx=(0, 8))
             self._action_buttons.append(b)
 
-        self.progress = ttk.Progressbar(actions, mode="indeterminate", length=220)
-        self.progress.pack(side="right")
+        self.profile_progress = ttk.Progressbar(actions, mode="indeterminate", length=220)
+        self.profile_progress.pack(side="right")
+        self._progress_bars.append(self.profile_progress)
 
         status = ttk.LabelFrame(outer, text="Status", padding=8)
         status.pack(fill="x", pady=(0, 10))
@@ -328,11 +358,241 @@ class TransferApp(tk.Tk):
 
         log_box = ttk.LabelFrame(outer, text="Log", padding=6)
         log_box.pack(fill="both", expand=True)
-        self.log_text = tk.Text(log_box, wrap="word", height=18, font=("Consolas", 9), state="disabled")
+        self.log_text = tk.Text(log_box, wrap="word", height=14, font=("Consolas", 9), state="disabled")
         scroll = ttk.Scrollbar(log_box, orient="vertical", command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=scroll.set)
         self.log_text.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
+        self._log_widgets.append(self.log_text)
+
+    def _build_install_tab(self, outer) -> None:
+        connection = ttk.LabelFrame(outer, text="Target device", padding=10)
+        connection.pack(fill="x")
+        connection.columnconfigure(1, weight=1)
+        self._build_install_endpoint(connection)
+
+        file_box = ttk.LabelFrame(outer, text="Local installation file", padding=10)
+        file_box.pack(fill="x", pady=(10, 0))
+        file_box.columnconfigure(1, weight=1)
+        self._path_row(file_box, 0, "File:", self.install_file_var, self._browse_install_file)
+        self._install_file_hint = ttk.Label(file_box, text="")
+        self._install_file_hint.grid(row=1, column=1, sticky="w", pady=(2, 0))
+
+        actions = ttk.Frame(outer)
+        actions.pack(fill="x", pady=10)
+
+        self.install_check_button = ttk.Button(
+            actions,
+            text="Check device",
+            command=lambda: self._start_worker(self._check_install_target, "install"),
+        )
+        self.install_check_button.pack(side="left", padx=(0, 8))
+        self._action_buttons.append(self.install_check_button)
+
+        self.install_action_button = ttk.Button(
+            actions,
+            text="INSTALL / UPDATE",
+            command=lambda: self._start_worker(self._install_or_update, "install"),
+        )
+        self.install_action_button.pack(side="left", padx=(0, 8))
+        self._action_buttons.append(self.install_action_button)
+
+        self.uninstall_button = ttk.Button(
+            actions,
+            text="UNINSTALL",
+            command=lambda: self._start_worker(self._uninstall_android_kodi, "install"),
+        )
+        self.uninstall_button.pack(side="left", padx=(0, 8))
+        self._action_buttons.append(self.uninstall_button)
+
+        self.install_progress = ttk.Progressbar(actions, mode="indeterminate", length=220)
+        self.install_progress.pack(side="right")
+        self._progress_bars.append(self.install_progress)
+
+        self.uninstall_backup_check = ttk.Checkbutton(
+            outer,
+            text="Back up the selected Kodi profile before uninstalling",
+            variable=self.uninstall_backup_var,
+        )
+        self.uninstall_backup_check.pack(anchor="w", pady=(0, 8))
+
+        status = ttk.LabelFrame(outer, text="Status", padding=8)
+        status.pack(fill="x", pady=(0, 10))
+        status.columnconfigure(1, weight=1)
+        self.install_status_frame = status
+        for row, (key, label) in enumerate(
+            (
+                ("install_device", "Device"),
+                ("install_kodi", "Installed Kodi"),
+                ("install", "Installation"),
+            )
+        ):
+            ttk.Label(status, text=label + ":").grid(row=row, column=0, sticky="nw", padx=(0, 10), pady=2)
+            var = tk.StringVar(value="—")
+            self.status_vars[key] = var
+            ttk.Label(status, textvariable=var).grid(row=row, column=1, sticky="w", pady=2)
+
+        log_box = ttk.LabelFrame(outer, text="Log", padding=6)
+        log_box.pack(fill="both", expand=True)
+        self.install_log_text = tk.Text(
+            log_box,
+            wrap="word",
+            height=14,
+            font=("Consolas", 9),
+            state="disabled",
+        )
+        scroll = ttk.Scrollbar(log_box, orient="vertical", command=self.install_log_text.yview)
+        self.install_log_text.configure(yscrollcommand=scroll.set)
+        self.install_log_text.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        self._log_widgets.append(self.install_log_text)
+
+        self._install_type_changed(initial=True)
+
+    def _build_install_endpoint(self, frame) -> None:
+        saved = self._cfg.get("install", {})
+        type_var = tk.StringVar(value=str(saved.get("type", "Android (ADB)")))
+        ip_var = tk.StringVar(value=str(saved.get("ip", "")))
+        default_port = DEFAULT_ADB_PORT if type_var.get().startswith("Android") else DEFAULT_SSH_PORT
+        port_var = tk.StringVar(value=str(saved.get("port", default_port)))
+        user_var = tk.StringVar(value=str(saved.get("user", "root")))
+        password_var = tk.StringVar(value="")
+        profile_var = tk.StringVar(value="")
+
+        self._endpoint_vars["install"] = {
+            "type": type_var,
+            "ip": ip_var,
+            "port": port_var,
+            "user": user_var,
+            "password": password_var,
+            "profile": profile_var,
+        }
+
+        ttk.Label(frame, text="Connection:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
+        type_box = ttk.Combobox(
+            frame,
+            textvariable=type_var,
+            values=("Android (ADB)", "LibreELEC (SSH)"),
+            state="readonly",
+            width=18,
+        )
+        type_box.grid(row=0, column=1, sticky="ew", pady=3)
+        type_box.bind("<<ComboboxSelected>>", lambda _e: self._install_type_changed())
+
+        ttk.Label(frame, text="IP:").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=3)
+        iprow = ttk.Frame(frame)
+        iprow.grid(row=1, column=1, sticky="ew", pady=3)
+        iprow.columnconfigure(0, weight=1)
+        ttk.Entry(iprow, textvariable=ip_var).grid(row=0, column=0, sticky="ew")
+        ttk.Label(iprow, text="Port:").grid(row=0, column=1, padx=(8, 4))
+        ttk.Entry(iprow, textvariable=port_var, width=7).grid(row=0, column=2)
+
+        user_label = ttk.Label(frame, text="SSH-User:")
+        user_label.grid(row=2, column=0, sticky="w", padx=(0, 8), pady=3)
+        user_entry = ttk.Entry(frame, textvariable=user_var)
+        user_entry.grid(row=2, column=1, sticky="ew", pady=3)
+
+        pass_label = ttk.Label(frame, text="SSH password:")
+        pass_label.grid(row=3, column=0, sticky="w", padx=(0, 8), pady=3)
+        pass_entry = ttk.Entry(frame, textvariable=password_var, show="●")
+        pass_entry.grid(row=3, column=1, sticky="ew", pady=3)
+
+        adb_label = ttk.Label(frame, text="ADB folder:")
+        adb_label.grid(row=4, column=0, sticky="w", padx=(0, 8), pady=3)
+        adb_holder = ttk.Frame(frame)
+        adb_holder.grid(row=4, column=1, sticky="ew", pady=3)
+        adb_holder.columnconfigure(0, weight=1)
+        ttk.Entry(adb_holder, textvariable=self.adb_dir_var).grid(row=0, column=0, sticky="ew")
+        ttk.Button(adb_holder, text="Browse…", command=self._browse_adb_dir, takefocus=False).grid(
+            row=0, column=1, padx=(6, 0)
+        )
+
+        kodi_label = ttk.Label(frame, text="Installed Kodi:")
+        kodi_label.grid(row=5, column=0, sticky="w", padx=(0, 8), pady=3)
+        profile_box = ttk.Combobox(frame, textvariable=profile_var, state="readonly")
+        profile_box.grid(row=5, column=1, sticky="ew", pady=3)
+        profile_box.bind("<<ComboboxSelected>>", lambda _e: self._refresh_install_controls())
+
+        self._endpoint_widgets["install"] = {
+            "user": user_entry,
+            "password": pass_entry,
+            "profile": profile_box,
+            "ssh_rows": (user_label, user_entry, pass_label, pass_entry),
+            "adb_rows": (adb_label, adb_holder),
+            "kodi_rows": (kodi_label, profile_box),
+        }
+
+    def _install_type_changed(self, initial: bool = False) -> None:
+        v = self._endpoint_vars["install"]
+        is_android = str(v["type"].get()).startswith("Android")
+        port = str(v["port"].get()).strip()
+        if not initial:
+            if is_android and port in ("", str(DEFAULT_SSH_PORT)):
+                v["port"].set(str(DEFAULT_ADB_PORT))
+            elif not is_android and port in ("", str(DEFAULT_ADB_PORT)):
+                v["port"].set(str(DEFAULT_SSH_PORT))
+
+        for widget in self._endpoint_widgets["install"]["ssh_rows"]:
+            if is_android:
+                widget.grid_remove()
+            else:
+                widget.grid()
+
+        for widget in self._endpoint_widgets["install"]["adb_rows"]:
+            if is_android:
+                widget.grid()
+            else:
+                widget.grid_remove()
+
+        for widget in self._endpoint_widgets["install"]["kodi_rows"]:
+            if is_android:
+                widget.grid()
+            else:
+                widget.grid_remove()
+
+        if not is_android and not str(v["user"].get()).strip():
+            v["user"].set("root")
+
+        self._install_profile_map = {}
+        v["profile"].set("")
+        self._endpoint_widgets["install"]["profile"].configure(values=())
+
+        if hasattr(self, "_install_file_hint"):
+            self._install_file_hint.configure(
+                text="Select a local APK file." if is_android else "Select a local LibreELEC update TAR."
+            )
+        if hasattr(self, "install_action_button"):
+            self.install_action_button.configure(
+                text="INSTALL / UPDATE" if is_android else "TRANSFER UPDATE"
+            )
+        if hasattr(self, "uninstall_button"):
+            if is_android:
+                self.uninstall_button.pack(side="left", padx=(0, 8), before=self.install_progress)
+                self.uninstall_backup_check.pack(
+                    anchor="w",
+                    pady=(0, 8),
+                    before=self.install_status_frame,
+                )
+            else:
+                self.uninstall_button.pack_forget()
+                self.uninstall_backup_check.pack_forget()
+
+        if hasattr(self, "status_vars"):
+            if "install_device" in self.status_vars:
+                self.status_vars["install_device"].set("—")
+            if "install_kodi" in self.status_vars:
+                self.status_vars["install_kodi"].set("—")
+            if "install" in self.status_vars:
+                self.status_vars["install"].set("—")
+        self._refresh_install_controls()
+
+    def _refresh_install_controls(self) -> None:
+        if not hasattr(self, "uninstall_button"):
+            return
+        is_android = str(self._endpoint_vars["install"]["type"].get()).startswith("Android")
+        selected = str(self._endpoint_vars["install"]["profile"].get()).strip()
+        can_uninstall = is_android and selected in self._install_profile_map and not self._busy
+        self.uninstall_button.configure(state="normal" if can_uninstall else "disabled")
 
     def _build_endpoint(self, parent, role: str, title: str, column: int) -> None:
         saved = self._cfg.get(role, {})
@@ -457,6 +717,20 @@ class TransferApp(tk.Tk):
         if p:
             self.backup_file_var.set(p)
 
+    def _browse_install_file(self) -> None:
+        is_android = str(self._endpoint_vars["install"]["type"].get()).startswith("Android")
+        current = self.install_file_var.get().strip()
+        initial = str(Path(current).parent) if current else str(Path.home())
+        if is_android:
+            filetypes = [("Android APK", "*.apk"), ("All files", "*.*")]
+            title = "Select Kodi APK"
+        else:
+            filetypes = [("LibreELEC update TAR", "*.tar"), ("All files", "*.*")]
+            title = "Select LibreELEC update TAR"
+        p = filedialog.askopenfilename(title=title, initialdir=initial, filetypes=filetypes)
+        if p:
+            self.install_file_var.set(p)
+
     # ---------- UI/log helpers ----------
     def _set_status(self, key: str, text: str) -> None:
         self._ui_queue.put(("status", (key, text)))
@@ -478,10 +752,11 @@ class TransferApp(tk.Tk):
             while True:
                 kind, payload = self._ui_queue.get_nowait()
                 if kind == "log":
-                    self.log_text.configure(state="normal")
-                    self.log_text.insert("end", str(payload) + "\n")
-                    self.log_text.see("end")
-                    self.log_text.configure(state="disabled")
+                    for widget in self._log_widgets:
+                        widget.configure(state="normal")
+                        widget.insert("end", str(payload) + "\n")
+                        widget.see("end")
+                        widget.configure(state="disabled")
                 elif kind == "status":
                     key, text = payload
                     self.status_vars[key].set(text)
@@ -492,6 +767,14 @@ class TransferApp(tk.Tk):
                     try:
                         self._endpoint_widgets[role]["profile"].configure(values=values)
                         self._endpoint_vars[role]["profile"].set(selected_text)
+                    finally:
+                        done.set()
+                elif kind == "install_profiles":
+                    values, selected_text, done = payload
+                    try:
+                        self._endpoint_widgets["install"]["profile"].configure(values=values)
+                        self._endpoint_vars["install"]["profile"].set(selected_text)
+                        self._refresh_install_controls()
                     finally:
                         done.set()
                 elif kind == "message":
@@ -511,29 +794,38 @@ class TransferApp(tk.Tk):
         state = "disabled" if busy else "normal"
         for button in self._action_buttons:
             button.configure(state=state)
-        if busy:
-            self.progress.start(12)
-        else:
-            self.progress.stop()
+        for progress in self._progress_bars:
+            if busy:
+                progress.start(12)
+            else:
+                progress.stop()
+        if not busy:
+            self._refresh_install_controls()
 
-    def _start_worker(self, fn) -> None:
+    def _start_worker(self, fn, error_status_key: str = "result") -> None:
         if self._busy:
             return
         self._save_config()
         self._ui_queue.put(("busy", True))
-        threading.Thread(target=self._worker_wrapper, args=(fn,), daemon=True).start()
+        threading.Thread(
+            target=self._worker_wrapper,
+            args=(fn, error_status_key),
+            daemon=True,
+        ).start()
 
-    def _worker_wrapper(self, fn) -> None:
+    def _worker_wrapper(self, fn, error_status_key: str) -> None:
         try:
             self._prepare_log_file()
             fn()
         except TransferError as e:
             self.log(f"ERROR: {e}")
-            self._set_status("result", f"ERROR: {e}")
+            if error_status_key in self.status_vars:
+                self._set_status(error_status_key, f"ERROR: {e}")
             self._ui_queue.put(("message", ("error", APP_TITLE, str(e))))
         except Exception as e:
             self.log(f"UNEXPECTED ERROR: {type(e).__name__}: {e}")
-            self._set_status("result", f"ERROR: {type(e).__name__}: {e}")
+            if error_status_key in self.status_vars:
+                self._set_status(error_status_key, f"ERROR: {type(e).__name__}: {e}")
             self._ui_queue.put(
                 ("message", ("error", APP_TITLE, f"Unexpected error:\n\n{type(e).__name__}: {e}"))
             )
@@ -649,13 +941,15 @@ class TransferApp(tk.Tk):
         try:
             ipaddress.ip_address(ip)
         except ValueError as e:
-            raise TransferError(f"{'Source' if role == 'source' else 'Target'}: invalid IP address.") from e
+            label = {"source": "Source", "target": "Target", "install": "Install target"}.get(role, "Target")
+            raise TransferError(f"{label}: invalid IP address.") from e
         try:
             port = int(str(v["port"].get()).strip())
             if not (1 <= port <= 65535):
                 raise ValueError
         except ValueError as e:
-            raise TransferError(f"{'Source' if role == 'source' else 'Target'}: invalid port.") from e
+            label = {"source": "Source", "target": "Target", "install": "Install target"}.get(role, "Target")
+            raise TransferError(f"{label}: invalid port.") from e
         return ip, port
 
     def _adb(self, serial: str, *args: str, timeout: int | None = 60, check: bool = False):
@@ -922,6 +1216,302 @@ class TransferApp(tk.Tk):
         self._set_status("result", "Check in progress …")
         self._inspect_endpoint(role)
         self._set_status("result", "Check OK")
+
+    # ---------- install / update ----------
+    def _install_profile_display(self, profile: dict) -> str:
+        version = profile.get("version", "").strip()
+        if version:
+            return f"{profile['name']} {version} — {profile['identifier']}"
+        return f"{profile['name']} — {profile['identifier']}"
+
+    def _publish_install_profiles(self, profiles: list[dict]) -> None:
+        mapping = {self._install_profile_display(p): p for p in profiles}
+        self._install_profile_map = mapping
+        current = str(self._endpoint_vars["install"]["profile"].get()).strip()
+
+        if current not in mapping:
+            current = next(iter(mapping)) if len(mapping) == 1 else ""
+
+        done = threading.Event()
+        self._ui_queue.put(("install_profiles", (list(mapping.keys()), current, done)))
+        done.wait()
+
+        if not profiles:
+            summary = "No Kodi installation found"
+        elif len(profiles) == 1:
+            summary = self._install_profile_display(profiles[0])
+        else:
+            summary = f"{len(profiles)} Kodi installations found – select one for uninstall"
+        self._set_status("install_kodi", summary)
+
+    def _inspect_install_device(self) -> dict:
+        kind = str(self._endpoint_vars["install"]["type"].get())
+        if kind.startswith("Android"):
+            ip, port = self._validate_ip_port("install")
+            serial, device = self._connect_android("install")
+            profiles = self._discover_android_profiles(serial)
+            self._publish_install_profiles(profiles)
+            info = {
+                "platform": "android",
+                "ip": ip,
+                "port": port,
+                "serial": serial,
+                "device": f"{device['manufacturer']} {device['model']}".strip(),
+                "arch": device["arch"],
+                "arch_family": arch_family(device["arch"]),
+                "android": device["android"],
+                "profiles": profiles,
+            }
+            label = f"{info['device']} | Android {info['android']} | {info['arch']}"
+            self._set_status("install_device", label)
+            self.log(f"Install target: {label}")
+            return info
+
+        ip, port = self._validate_ip_port("install")
+        client = self._ssh_client("install")
+        try:
+            code, os_release, _ = self._ssh_exec(client, "cat /etc/os-release 2>/dev/null", timeout=20)
+            if code != 0 or "libreelec" not in os_release.lower():
+                raise TransferError("The SSH target does not identify itself as LibreELEC.")
+            code, arch, _ = self._ssh_exec(client, "uname -m", timeout=20)
+            if code != 0:
+                raise TransferError("CPU architecture could not be determined.")
+            _, kodi_version, _ = self._ssh_exec(client, "kodi --version 2>/dev/null | head -1", timeout=20)
+            pretty = ""
+            m = re.search(r'^PRETTY_NAME=["\']?([^"\'\n]+)', os_release, flags=re.MULTILINE)
+            if m:
+                pretty = m.group(1).strip()
+        finally:
+            client.close()
+
+        self._publish_install_profiles([])
+        label = f"{pretty or 'LibreELEC'} | {arch.strip()}"
+        self._set_status("install_device", label)
+        self._set_status("install_kodi", kodi_version.strip() or "Kodi version not reported")
+        self.log(f"Install target: {label}")
+        return {
+            "platform": "libreelec",
+            "ip": ip,
+            "port": port,
+            "device": pretty or "LibreELEC",
+            "arch": arch.strip(),
+            "arch_family": arch_family(arch),
+            "version": kodi_version.strip(),
+            "profiles": [],
+        }
+
+    def _check_install_target(self) -> None:
+        self._set_status("install", "Checking device …")
+        self._inspect_install_device()
+        self._set_status("install", "Check OK")
+
+    def _selected_install_profile(self) -> dict:
+        selected = str(self._endpoint_vars["install"]["profile"].get()).strip()
+        profile = self._install_profile_map.get(selected)
+        if profile is None:
+            raise TransferError("Select the Kodi installation to uninstall.")
+        return profile
+
+    def _install_or_update(self) -> None:
+        path = Path(self.install_file_var.get().strip())
+        if not path.is_file():
+            raise TransferError(f"Installation file not found: {path}")
+
+        info = self._inspect_install_device()
+        if info["platform"] == "android":
+            if path.suffix.lower() != ".apk":
+                raise TransferError("Android installation requires a local .apk file.")
+            self._install_android_apk(path, info)
+            return
+
+        if path.suffix.lower() != ".tar":
+            raise TransferError("LibreELEC update requires a local .tar file.")
+        self._upload_libreelec_update(path, info)
+
+    def _install_android_apk(self, path: Path, info: dict) -> None:
+        before = {p["identifier"]: p for p in info["profiles"]}
+        installed_text = "\n".join(
+            f"  {p['name']} {p.get('version', '')}  ({p['identifier']})".rstrip()
+            for p in info["profiles"]
+        ) or "  No Kodi installation currently found."
+
+        if not self._ask_yes_no(
+            "Install / update Kodi",
+            f"Device:\n{info['device']} ({info['ip']})\n\n"
+            f"Local APK:\n{path}\n\n"
+            f"Installed Kodi packages:\n{installed_text}\n\n"
+            "Android will use the package ID embedded in the APK. "
+            "A matching package will be updated; otherwise it will be installed as a new app.\n\n"
+            "Continue?",
+        ):
+            raise TransferError("Installation was cancelled.")
+
+        self._set_status("install", f"Installing {path.name} …")
+        adb = self._find_or_install_adb()
+        cp = self._run(
+            [str(adb), "-s", info["serial"], "install", "-r", str(path)],
+            timeout=None,
+        )
+        output = (cp.stdout or "").strip()
+        if cp.returncode != 0 or "success" not in output.lower():
+            if "INSTALL_FAILED_UPDATE_INCOMPATIBLE" in output or "signatures do not match" in output.lower():
+                raise TransferError(
+                    "Android rejected the update because the APK signature does not match the installed app. "
+                    "The existing app was NOT uninstalled."
+                )
+            raise TransferError(f"APK installation failed.{(' Device: ' + output) if output else ''}")
+
+        after = self._discover_android_profiles(info["serial"])
+        self._publish_install_profiles(after)
+        after_map = {p["identifier"]: p for p in after}
+
+        new_packages = [p for package, p in after_map.items() if package not in before]
+        changed_packages = [
+            p
+            for package, p in after_map.items()
+            if package in before and p.get("version", "") != before[package].get("version", "")
+        ]
+
+        if len(new_packages) == 1:
+            p = new_packages[0]
+            result = f"Installed {p['name']} {p.get('version', '')}".strip()
+        elif len(changed_packages) == 1:
+            p = changed_packages[0]
+            old = before[p["identifier"]].get("version", "")
+            new = p.get("version", "")
+            result = f"Updated {p['name']} {old} → {new}".strip()
+        else:
+            result = f"APK installed successfully: {path.name}"
+
+        self.log(result)
+        self._set_status("install", result)
+        self._ui_queue.put(("message", ("info", APP_TITLE, result)))
+
+    def _uninstall_android_kodi(self) -> None:
+        if not str(self._endpoint_vars["install"]["type"].get()).startswith("Android"):
+            raise TransferError("Uninstall is available only for Android.")
+
+        selected_text = str(self._endpoint_vars["install"]["profile"].get()).strip()
+        info = self._inspect_install_device()
+        if selected_text:
+            self._endpoint_vars["install"]["profile"].set(selected_text)
+        profile = self._selected_install_profile()
+
+        backup_requested = bool(self.uninstall_backup_var.get())
+        backup_note = (
+            "A profile backup will be created before uninstalling."
+            if backup_requested and profile["profile_exists"]
+            else "No profile backup will be created before uninstalling."
+        )
+        if not self._ask_yes_no(
+            "Uninstall Kodi",
+            f"Device:\n{info['device']} ({info['ip']})\n\n"
+            f"Kodi:\n{profile['name']} {profile.get('version', '')}\n"
+            f"Package: {profile['identifier']}\n\n"
+            f"{backup_note}\n\n"
+            "Android will remove this app and its app data. Continue?",
+        ):
+            raise TransferError("Uninstall was cancelled.")
+
+        backup_path: Path | None = None
+        target = {
+            **info,
+            "name": profile["name"],
+            "identifier": profile["identifier"],
+            "profile_root": profile["profile_root"],
+            "profile_exists": profile["profile_exists"],
+            "version": profile.get("version", ""),
+        }
+
+        if backup_requested and profile["profile_exists"]:
+            self.log("Creating profile backup before uninstall …")
+            backup_path, _ = self._create_backup(target, "install")
+
+        self._set_status("install", f"Uninstalling {profile['name']} …")
+        cp = self._adb(info["serial"], "uninstall", profile["identifier"], timeout=120)
+        output = (cp.stdout or "").strip()
+        if cp.returncode != 0 or "success" not in output.lower():
+            raise TransferError(f"Android uninstall failed.{(' Device: ' + output) if output else ''}")
+
+        remaining = self._discover_android_profiles(info["serial"])
+        self._publish_install_profiles(remaining)
+        result = f"Uninstalled {profile['name']} ({profile['identifier']})"
+        if backup_path:
+            result += f"\n\nProfile backup:\n{backup_path}"
+        self.log(result.replace("\n", " | "))
+        self._set_status("install", f"Uninstalled {profile['name']}")
+        self._ui_queue.put(("message", ("info", APP_TITLE, result)))
+
+    def _upload_libreelec_update(self, path: Path, info: dict) -> None:
+        if not self._ask_yes_no(
+            "Transfer LibreELEC update",
+            f"Target:\n{info['device']} ({info['ip']})\n\n"
+            f"Local update TAR:\n{path}\n\n"
+            "The TAR will be uploaded to /storage/.update/. "
+            "The existing /storage data, including the Kodi profile, is not intentionally removed.\n\n"
+            "Continue?",
+        ):
+            raise TransferError("Update transfer was cancelled.")
+
+        client = self._ssh_client("install")
+        remote_final = f"/storage/.update/{path.name}"
+        remote_temp = f"/storage/.update/.jjs-upload-{int(time.time())}.tmp"
+        sftp = None
+        try:
+            code, _, err = self._ssh_exec(client, "mkdir -p /storage/.update", timeout=30)
+            if code != 0:
+                raise TransferError(f"Could not create LibreELEC update folder: {err}")
+
+            self._set_status("install", f"Uploading {path.name} …")
+            self.log(f"Uploading update TAR to temporary file: {remote_temp}")
+            sftp = client.open_sftp()
+            sftp.put(str(path), remote_temp)
+            remote_size = sftp.stat(remote_temp).st_size
+            local_size = path.stat().st_size
+            if remote_size != local_size:
+                raise TransferError(
+                    f"Uploaded TAR size mismatch: local {local_size} bytes, remote {remote_size} bytes."
+                )
+
+            command = (
+                f"rm -f {shlex.quote(remote_final)} && "
+                f"mv {shlex.quote(remote_temp)} {shlex.quote(remote_final)}"
+            )
+            code, _, err = self._ssh_exec(client, command, timeout=30)
+            if code != 0:
+                raise TransferError(f"Could not activate LibreELEC update TAR: {err}")
+        except Exception:
+            try:
+                if sftp is not None:
+                    sftp.remove(remote_temp)
+            except Exception:
+                pass
+            client.close()
+            raise
+        finally:
+            if sftp is not None:
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
+
+        self.log(f"LibreELEC update uploaded: {remote_final}")
+        reboot = self._ask_yes_no(
+            "LibreELEC update ready",
+            f"Update uploaded successfully:\n{remote_final}\n\n"
+            "Restart LibreELEC now to install the update?",
+        )
+        if reboot:
+            self.log("$ ssh: systemctl reboot")
+            try:
+                client.exec_command("systemctl reboot")
+                time.sleep(0.5)
+            except Exception as e:
+                self.log(f"Reboot command sent; connection closed with: {e}")
+            self._set_status("install", "Update uploaded – reboot requested")
+        else:
+            self._set_status("install", "Update uploaded – reboot later to install")
+        client.close()
 
     # ---------- Kodi process handling ----------
     def _is_kodi_running(self, info: dict, role: str) -> bool:
