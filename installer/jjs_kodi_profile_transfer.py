@@ -684,6 +684,8 @@ class TransferApp(tk.Tk):
             # A profile from the other platform must never survive a connection-type switch.
             v["profile"].set("")
             self._endpoint_widgets[role]["profile"].configure(values=())
+            if role == "target" and "install" in self._endpoint_widgets:
+                self._endpoint_widgets["install"]["profile"].configure(values=())
 
         for widget in self._endpoint_widgets[role]["ssh_rows"]:
             if is_android:
@@ -1100,6 +1102,9 @@ class TransferApp(tk.Tk):
 
     # ---------- endpoint discovery ----------
     def _profile_display(self, profile: dict) -> str:
+        version = profile.get("version", "").strip()
+        if version:
+            return f"{profile['name']} {version} — {profile['identifier']}"
         return f"{profile['name']} — {profile['identifier']}"
 
     def _choose_profile(self, role: str, profiles: list[dict]) -> dict:
@@ -1270,10 +1275,7 @@ class TransferApp(tk.Tk):
 
     # ---------- install / update ----------
     def _install_profile_display(self, profile: dict) -> str:
-        version = profile.get("version", "").strip()
-        if version:
-            return f"{profile['name']} {version} — {profile['identifier']}"
-        return f"{profile['name']} — {profile['identifier']}"
+        return self._profile_display(profile)
 
     def _publish_install_profiles(self, profiles: list[dict]) -> None:
         mapping = {self._install_profile_display(p): p for p in profiles}
