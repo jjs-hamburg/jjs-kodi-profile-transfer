@@ -1430,6 +1430,93 @@ class TransferApp(tk.Tk):
             raise TransferError("LibreELEC update requires a local .tar file.")
         self._upload_libreelec_update(path, info)
 
+    def _configure_fresh_android_kodi_permissions(self, serial: str, package: str) -> None:
+        """Grant Kodi's required Android permissions after a fresh installation."""
+        self.log(f"Configuring persistent Android permissions for {package} …")
+
+        failures: list[str] = []
+
+        mic = self._adb(
+            serial,
+            "shell",
+            "pm",
+            "grant",
+            package,
+            "android.permission.RECORD_AUDIO",
+            timeout=30,
+        )
+        if mic.returncode != 0:
+            failures.append("Microphone permission could not be granted")
+
+        storage = self._adb(
+            serial,
+            "shell",
+            "appops",
+            "set",
+            "--uid",
+            package,
+            "MANAGE_EXTERNAL_STORAGE",
+            "allow",
+            timeout=30,
+        )
+        if storage.returncode != 0:
+            failures.append('"All files" access could not be enabled')
+
+        # Android 11+ can automatically revoke sensitive runtime permissions when
+        # an app is unused for a long period. Disable that behavior for this Kodi
+        # package so RECORD_AUDIO remains granted across normal long-term use.
+        auto_revoke = self._adb(
+            serial,
+            "shell",
+            "appops",
+            "set",
+            package,
+            "AUTO_REVOKE_PERMISSIONS_IF_UNUSED",
+            "ignore",
+            timeout=30,
+        )
+        if auto_revoke.returncode != 0:
+            self.log(
+                "Note: Android did not accept AUTO_REVOKE_PERMISSIONS_IF_UNUSED. "
+                "This Android version/device may not expose that app-op."
+            )
+
+        dump = self._adb(serial, "shell", "dumpsys", "package", package, timeout=30)
+        dump_text = dump.stdout or ""
+        mic_ok = bool(
+            re.search(
+                r"android\.permission\.RECORD_AUDIO:.*granted=true",
+                dump_text,
+            )
+        )
+        if not mic_ok and "Microphone permission could not be granted" not in failures:
+            failures.append("Microphone permission could not be verified")
+
+        storage_check = self._adb(
+            serial,
+            "shell",
+            "appops",
+            "get",
+            "--uid",
+            package,
+            "MANAGE_EXTERNAL_STORAGE",
+            timeout=30,
+        )
+        storage_text = (storage_check.stdout or "").lower()
+        if storage_check.returncode != 0 or "allow" not in storage_text:
+            if '"All files" access could not be enabled' not in failures:
+                failures.append('"All files" access could not be verified')
+
+        if failures:
+            raise TransferError(
+                "Kodi was installed, but Android permission setup is incomplete:\n\n"
+                + "\n".join(f"• {item}" for item in failures)
+            )
+
+        self.log("Android permissions OK: microphone + all files.")
+        if auto_revoke.returncode == 0:
+            self.log("Android unused-app permission revocation disabled for this Kodi package.")
+
     def _install_android_apk(self, path: Path, info: dict) -> None:
         before = {p["identifier"]: p for p in info["profiles"]}
         installed_text = "\n".join(
@@ -1476,6 +1563,10 @@ class TransferApp(tk.Tk):
 
         if len(new_packages) == 1:
             p = new_packages[0]
+            self._configure_fresh_android_kodi_permissions(
+                info["serial"],
+                p["identifier"],
+            )
             result = f"Installed {p['name']} {p.get('version', '')}".strip()
         elif len(changed_packages) == 1:
             p = changed_packages[0]
