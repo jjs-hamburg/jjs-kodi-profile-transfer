@@ -419,6 +419,7 @@ class TransferApp(tk.Tk):
         status = ttk.LabelFrame(outer, text="Status", padding=8)
         status.pack(fill="x", pady=(0, 10))
         status.columnconfigure(1, weight=1)
+        self.install_status_frame = status
         for row, (key, label) in enumerate(
             (
                 ("install_device", "Device"),
@@ -566,8 +567,12 @@ class TransferApp(tk.Tk):
             )
         if hasattr(self, "uninstall_button"):
             if is_android:
-                self.uninstall_button.pack(side="left", padx=(0, 8))
-                self.uninstall_backup_check.pack(anchor="w", pady=(0, 8))
+                self.uninstall_button.pack(side="left", padx=(0, 8), before=self.install_progress)
+                self.uninstall_backup_check.pack(
+                    anchor="w",
+                    pady=(0, 8),
+                    before=self.install_status_frame,
+                )
             else:
                 self.uninstall_button.pack_forget()
                 self.uninstall_backup_check.pack_forget()
@@ -1481,6 +1486,7 @@ class TransferApp(tk.Tk):
                     sftp.remove(remote_temp)
             except Exception:
                 pass
+            client.close()
             raise
         finally:
             if sftp is not None:
