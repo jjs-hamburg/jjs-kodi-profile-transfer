@@ -5,12 +5,14 @@ A Windows tool for managing Kodi installations and profiles on:
 - Android / NVIDIA Shield via ADB
 - LibreELEC via SSH
 
-Current version: **1.11**
+Current version: **1.12**
 
 The application has two separate areas:
 
 - **Profile Backup / Restore / Transfer**
 - **Kodi Install / Update**
+
+Both tabs show the same target device. Connection type, IP address, port, SSH credentials, and the detected Kodi installations are synchronized so the target does not need to be entered twice.
 
 All Kodi installation and update files are selected locally. The tool does not download Kodi builds.
 
@@ -112,7 +114,7 @@ The Windows executable is built automatically with GitHub Actions and PyInstalle
 
 Download the current executable from:
 
-**Releases → JJS KODI Profile Backup/Restore, Transfer & Install 1.11**
+**Releases → JJS KODI Profile Backup/Restore, Transfer & Install 1.12**
 
 Release files:
 

@@ -46,7 +46,7 @@ except ImportError:
 
 
 APP_TITLE = "JJS KODI Profile Backup/Restore, Transfer & Install"
-APP_VERSION = "1.11"
+APP_VERSION = "1.12"
 META_NAME = "JJS_PROFILE_TRANSFER.json"
 
 DEFAULT_ADB_PORT = 5555
@@ -255,15 +255,6 @@ class TransferApp(tk.Tk):
                     "profile": str(v["profile"].get()).strip(),
                 }
 
-        v = self._endpoint_vars.get("install", {})
-        if v:
-            cfg["install"] = {
-                "type": str(v["type"].get()),
-                "ip": str(v["ip"].get()).strip(),
-                "port": str(v["port"].get()).strip(),
-                "user": str(v["user"].get()).strip(),
-            }
-
         try:
             config_path().write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
         except Exception:
@@ -287,7 +278,25 @@ class TransferApp(tk.Tk):
         self.install_file_var = tk.StringVar(value=str(self._cfg.get("install_file", "")))
         self.uninstall_backup_var = tk.BooleanVar(value=bool(self._cfg.get("uninstall_backup", True)))
 
-        notebook = ttk.Notebook(outer)
+        style = ttk.Style(self)
+        style.configure(
+            "JJS.TNotebook",
+            tabmargins=(4, 4, 4, 0),
+            borderwidth=1,
+            relief="solid",
+        )
+        style.configure(
+            "JJS.TNotebook.Tab",
+            padding=(18, 9),
+            font=("Segoe UI", 10, "bold"),
+        )
+        style.map(
+            "JJS.TNotebook.Tab",
+            padding=[("selected", (20, 10)), ("!selected", (18, 8))],
+            relief=[("selected", "raised"), ("!selected", "flat")],
+        )
+
+        notebook = ttk.Notebook(outer, style="JJS.TNotebook")
         notebook.pack(fill="both", expand=True)
 
         profile_tab = ttk.Frame(notebook, padding=10)
@@ -450,23 +459,18 @@ class TransferApp(tk.Tk):
         self._install_type_changed(initial=True)
 
     def _build_install_endpoint(self, frame) -> None:
-        saved = self._cfg.get("install", {})
-        type_var = tk.StringVar(value=str(saved.get("type", "Android (ADB)")))
-        ip_var = tk.StringVar(value=str(saved.get("ip", "")))
-        default_port = DEFAULT_ADB_PORT if type_var.get().startswith("Android") else DEFAULT_SSH_PORT
-        port_var = tk.StringVar(value=str(saved.get("port", default_port)))
-        user_var = tk.StringVar(value=str(saved.get("user", "root")))
-        password_var = tk.StringVar(value="")
-        profile_var = tk.StringVar(value="")
+        # Target B and the Install / Update tab are two views of the same target device.
+        # Reuse the exact same Tk variables so edits in either tab are visible immediately
+        # in the other tab and there is no second, diverging device configuration.
+        target_vars = self._endpoint_vars["target"]
+        type_var = target_vars["type"]
+        ip_var = target_vars["ip"]
+        port_var = target_vars["port"]
+        user_var = target_vars["user"]
+        password_var = target_vars["password"]
+        profile_var = target_vars["profile"]
 
-        self._endpoint_vars["install"] = {
-            "type": type_var,
-            "ip": ip_var,
-            "port": port_var,
-            "user": user_var,
-            "password": password_var,
-            "profile": profile_var,
-        }
+        self._endpoint_vars["install"] = target_vars
 
         ttk.Label(frame, text="Connection:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
         type_box = ttk.Combobox(
@@ -526,17 +530,21 @@ class TransferApp(tk.Tk):
         v = self._endpoint_vars["install"]
         is_android = str(v["type"].get()).startswith("Android")
         port = str(v["port"].get()).strip()
+
         if not initial:
             if is_android and port in ("", str(DEFAULT_SSH_PORT)):
                 v["port"].set(str(DEFAULT_ADB_PORT))
             elif not is_android and port in ("", str(DEFAULT_ADB_PORT)):
                 v["port"].set(str(DEFAULT_SSH_PORT))
 
-        for widget in self._endpoint_widgets["install"]["ssh_rows"]:
-            if is_android:
-                widget.grid_remove()
-            else:
-                widget.grid()
+        # Keep the profile-tab Target B controls in sync with the same connection type.
+        for role in ("target", "install"):
+            widgets = self._endpoint_widgets.get(role, {})
+            for widget in widgets.get("ssh_rows", ()):
+                if is_android:
+                    widget.grid_remove()
+                else:
+                    widget.grid()
 
         for widget in self._endpoint_widgets["install"]["adb_rows"]:
             if is_android:
@@ -552,10 +560,6 @@ class TransferApp(tk.Tk):
 
         if not is_android and not str(v["user"].get()).strip():
             v["user"].set("root")
-
-        self._install_profile_map = {}
-        v["profile"].set("")
-        self._endpoint_widgets["install"]["profile"].configure(values=())
 
         if hasattr(self, "_install_file_hint"):
             self._install_file_hint.configure(
@@ -577,13 +581,18 @@ class TransferApp(tk.Tk):
                 self.uninstall_button.pack_forget()
                 self.uninstall_backup_check.pack_forget()
 
-        if hasattr(self, "status_vars"):
-            if "install_device" in self.status_vars:
-                self.status_vars["install_device"].set("—")
-            if "install_kodi" in self.status_vars:
-                self.status_vars["install_kodi"].set("—")
-            if "install" in self.status_vars:
-                self.status_vars["install"].set("—")
+        # A connection-type change invalidates the previously discovered device state.
+        if not initial:
+            self._install_profile_map = {}
+            v["profile"].set("")
+            self._endpoint_widgets["install"]["profile"].configure(values=())
+            self._endpoint_widgets["target"]["profile"].configure(values=())
+            self._endpoint_profiles["target"] = {}
+            if hasattr(self, "status_vars"):
+                self._set_status("target", "—")
+                self._set_status("install_device", "—")
+                self._set_status("install_kodi", "—")
+                self._set_status("install", "—")
         self._refresh_install_controls()
 
     def _refresh_install_controls(self) -> None:
@@ -675,6 +684,8 @@ class TransferApp(tk.Tk):
             # A profile from the other platform must never survive a connection-type switch.
             v["profile"].set("")
             self._endpoint_widgets[role]["profile"].configure(values=())
+            if role == "target" and "install" in self._endpoint_widgets:
+                self._endpoint_widgets["install"]["profile"].configure(values=())
 
         for widget in self._endpoint_widgets[role]["ssh_rows"]:
             if is_android:
@@ -685,6 +696,9 @@ class TransferApp(tk.Tk):
         if not is_android and not str(v["user"].get()).strip():
             v["user"].set("root")
         self._endpoint_profiles[role] = {}
+
+        if role == "target" and "install" in self._endpoint_widgets:
+            self._install_type_changed(initial=initial)
 
     def _path_row(self, parent, row: int, label: str, variable: tk.StringVar, command) -> None:
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=3)
@@ -1088,6 +1102,9 @@ class TransferApp(tk.Tk):
 
     # ---------- endpoint discovery ----------
     def _profile_display(self, profile: dict) -> str:
+        version = profile.get("version", "").strip()
+        if version:
+            return f"{profile['name']} {version} — {profile['identifier']}"
         return f"{profile['name']} — {profile['identifier']}"
 
     def _choose_profile(self, role: str, profiles: list[dict]) -> dict:
@@ -1214,15 +1231,51 @@ class TransferApp(tk.Tk):
 
     def _check_endpoint(self, role: str) -> None:
         self._set_status("result", "Check in progress …")
-        self._inspect_endpoint(role)
+        info = self._inspect_endpoint(role)
+        if role == "target":
+            self._sync_checked_target_to_install(info)
         self._set_status("result", "Check OK")
+
+    def _sync_checked_target_to_install(self, info: dict) -> None:
+        """Expose a checked Target B immediately in the Install / Update tab."""
+        if info["platform"] == "android":
+            profiles = self._discover_android_profiles(info["serial"])
+            mapping = {self._install_profile_display(p): p for p in profiles}
+            self._install_profile_map = mapping
+
+            selected = str(self._endpoint_vars["target"]["profile"].get()).strip()
+            if selected not in mapping:
+                for display, profile in mapping.items():
+                    if profile["identifier"] == info["identifier"]:
+                        selected = display
+                        break
+
+            done = threading.Event()
+            self._ui_queue.put(("install_profiles", (list(mapping.keys()), selected, done)))
+            done.wait()
+            self._set_status(
+                "install_device",
+                f"{info['device']} | Android | {info['arch']}",
+            )
+            if len(profiles) == 1:
+                self._set_status("install_kodi", self._install_profile_display(profiles[0]))
+            else:
+                self._set_status(
+                    "install_kodi",
+                    f"{len(profiles)} Kodi installations found – selected: {info['name']}",
+                )
+        else:
+            self._install_profile_map = {}
+            self._set_status(
+                "install_device",
+                f"{info['device']} | {info['arch']}",
+            )
+            self._set_status("install_kodi", info.get("version", "") or "Kodi")
+        self._set_status("install", "Target B already checked")
 
     # ---------- install / update ----------
     def _install_profile_display(self, profile: dict) -> str:
-        version = profile.get("version", "").strip()
-        if version:
-            return f"{profile['name']} {version} — {profile['identifier']}"
-        return f"{profile['name']} — {profile['identifier']}"
+        return self._profile_display(profile)
 
     def _publish_install_profiles(self, profiles: list[dict]) -> None:
         mapping = {self._install_profile_display(p): p for p in profiles}
@@ -1302,8 +1355,57 @@ class TransferApp(tk.Tk):
 
     def _check_install_target(self) -> None:
         self._set_status("install", "Checking device …")
-        self._inspect_install_device()
+        info = self._inspect_install_device()
+        self._sync_checked_install_to_target(info)
         self._set_status("install", "Check OK")
+
+    def _sync_checked_install_to_target(self, info: dict) -> None:
+        """Expose an Install / Update device check immediately as Target B."""
+        if info["platform"] == "android":
+            profiles = info["profiles"]
+            mapping = {self._profile_display(p): p for p in profiles}
+            self._endpoint_profiles["target"] = mapping
+            selected_install = str(self._endpoint_vars["install"]["profile"].get()).strip()
+            selected_identifier = ""
+            selected_profile = self._install_profile_map.get(selected_install)
+            if selected_profile is not None:
+                selected_identifier = selected_profile["identifier"]
+
+            selected_target = ""
+            for display, profile in mapping.items():
+                if profile["identifier"] == selected_identifier:
+                    selected_target = display
+                    break
+            if not selected_target and len(mapping) == 1:
+                selected_target = next(iter(mapping))
+
+            done = threading.Event()
+            self._ui_queue.put(("profiles", ("target", list(mapping.keys()), selected_target, done)))
+            done.wait()
+
+            target_name = "Kodi"
+            if selected_target in mapping:
+                target_name = mapping[selected_target]["name"]
+            self._set_status(
+                "target",
+                f"{info['device']} | {target_name} | {info['arch']} | checked via Install / Update",
+            )
+        else:
+            self._endpoint_profiles["target"] = {
+                "Kodi — /storage/.kodi": {
+                    "name": "Kodi",
+                    "identifier": "/storage/.kodi",
+                    "profile_root": "/storage/.kodi",
+                    "profile_exists": True,
+                }
+            }
+            done = threading.Event()
+            self._ui_queue.put(("profiles", ("target", ["Kodi — /storage/.kodi"], "Kodi — /storage/.kodi", done)))
+            done.wait()
+            self._set_status(
+                "target",
+                f"{info['device']} | Kodi | /storage/.kodi | {info['arch']} | checked via Install / Update",
+            )
 
     def _selected_install_profile(self) -> dict:
         selected = str(self._endpoint_vars["install"]["profile"].get()).strip()
@@ -1327,6 +1429,124 @@ class TransferApp(tk.Tk):
         if path.suffix.lower() != ".tar":
             raise TransferError("LibreELEC update requires a local .tar file.")
         self._upload_libreelec_update(path, info)
+
+    def _configure_fresh_android_kodi_permissions(
+        self,
+        serial: str,
+        package: str,
+        android_version: str,
+    ) -> None:
+        """Grant Kodi's required Android permissions after a fresh installation."""
+        self.log(f"Configuring persistent Android permissions for {package} …")
+
+        failures: list[str] = []
+
+        mic = self._adb(
+            serial,
+            "shell",
+            "pm",
+            "grant",
+            package,
+            "android.permission.RECORD_AUDIO",
+            timeout=30,
+        )
+        if mic.returncode != 0:
+            failures.append("Microphone permission could not be granted")
+
+        storage = self._adb(
+            serial,
+            "shell",
+            "appops",
+            "set",
+            "--uid",
+            package,
+            "MANAGE_EXTERNAL_STORAGE",
+            "allow",
+            timeout=30,
+        )
+        if storage.returncode != 0:
+            failures.append('"All files" access could not be enabled')
+
+        # Android 11+ can automatically revoke sensitive runtime permissions when
+        # an app is unused for a long period. Disable that behavior for this Kodi
+        # package so RECORD_AUDIO remains granted across normal long-term use.
+        auto_revoke = self._adb(
+            serial,
+            "shell",
+            "appops",
+            "set",
+            package,
+            "AUTO_REVOKE_PERMISSIONS_IF_UNUSED",
+            "ignore",
+            timeout=30,
+        )
+        try:
+            android_major = int((android_version or "0").split(".", 1)[0])
+        except ValueError:
+            android_major = 0
+
+        auto_revoke_ok = auto_revoke.returncode == 0
+        if auto_revoke_ok:
+            auto_revoke_check = self._adb(
+                serial,
+                "shell",
+                "appops",
+                "get",
+                package,
+                "AUTO_REVOKE_PERMISSIONS_IF_UNUSED",
+                timeout=30,
+            )
+            auto_revoke_text = (auto_revoke_check.stdout or "").lower()
+            auto_revoke_ok = (
+                auto_revoke_check.returncode == 0
+                and "ignore" in auto_revoke_text
+            )
+
+        if android_major >= 11 and not auto_revoke_ok:
+            failures.append(
+                'Android "remove permissions if app is unused" could not be disabled'
+            )
+        elif not auto_revoke_ok:
+            self.log(
+                "Note: This Android version/device does not expose "
+                "AUTO_REVOKE_PERMISSIONS_IF_UNUSED."
+            )
+
+        dump = self._adb(serial, "shell", "dumpsys", "package", package, timeout=30)
+        dump_text = dump.stdout or ""
+        mic_ok = bool(
+            re.search(
+                r"android\.permission\.RECORD_AUDIO:.*granted=true",
+                dump_text,
+            )
+        )
+        if not mic_ok and "Microphone permission could not be granted" not in failures:
+            failures.append("Microphone permission could not be verified")
+
+        storage_check = self._adb(
+            serial,
+            "shell",
+            "appops",
+            "get",
+            "--uid",
+            package,
+            "MANAGE_EXTERNAL_STORAGE",
+            timeout=30,
+        )
+        storage_text = (storage_check.stdout or "").lower()
+        if storage_check.returncode != 0 or "allow" not in storage_text:
+            if '"All files" access could not be enabled' not in failures:
+                failures.append('"All files" access could not be verified')
+
+        if failures:
+            raise TransferError(
+                "Kodi was installed, but Android permission setup is incomplete:\n\n"
+                + "\n".join(f"• {item}" for item in failures)
+            )
+
+        self.log("Android permissions OK: microphone + all files.")
+        if auto_revoke_ok:
+            self.log("Android unused-app permission revocation disabled for this Kodi package.")
 
     def _install_android_apk(self, path: Path, info: dict) -> None:
         before = {p["identifier"]: p for p in info["profiles"]}
@@ -1374,6 +1594,11 @@ class TransferApp(tk.Tk):
 
         if len(new_packages) == 1:
             p = new_packages[0]
+            self._configure_fresh_android_kodi_permissions(
+                info["serial"],
+                p["identifier"],
+                info.get("android", ""),
+            )
             result = f"Installed {p['name']} {p.get('version', '')}".strip()
         elif len(changed_packages) == 1:
             p = changed_packages[0]

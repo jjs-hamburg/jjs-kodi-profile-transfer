@@ -45,7 +45,7 @@ jobs:
         run: |
           python -m py_compile installer/jjs_kodi_profile_transfer.py
           python -c "from pathlib import Path; s=Path(\'installer/jjs_kodi_profile_transfer.py\').read_text(encoding=\'utf-8\'); assert r\'\\n            command =\' not in s, \'literal escaped newline found\'"
-          python -c "import installer.jjs_kodi_profile_transfer as m; assert m.APP_VERSION == '1.11'; print(m.APP_TITLE, m.APP_VERSION)"
+          python -c "import installer.jjs_kodi_profile_transfer as m; assert m.APP_VERSION == '1.12'; print(m.APP_TITLE, m.APP_VERSION)"
           python -c "from pathlib import Path; s=Path('installer/jjs_kodi_profile_transfer.py').read_text(encoding='utf-8'); assert 'Transferring restore archive as a file to Android' not in s; assert 'Direct Android profile transfer completed.' in s"
           python -c "import installer.jjs_kodi_profile_transfer as m; assert m.normalize_windows_unc_path('//MEDIA-NAS/mce/test.tar') == r'\\MEDIA-NAS\mce\test.tar'; assert m.replace_unc_server('//MEDIA-NAS/mce/test.tar', '192.0.2.10') == r'\\192.0.2.10\mce\test.tar'; print('UNC normalization/fallback OK')"
           python -c "from pathlib import Path; s=Path('installer/jjs_kodi_profile_transfer.py').read_text(encoding='utf-8'); assert 'same platform - full restore' in s; assert 'Preserved target Addons*.db' in s; assert 'binary addon settings' in s; print('Cross-platform addon policy OK')"
@@ -70,14 +70,25 @@ jobs:
           "$hash  JJS-KODI-Profile-Backup-Restore-Transfer.exe" | Set-Content -Encoding ascii dist/SHA256SUMS.txt
           Get-Content dist/SHA256SUMS.txt
 
+      - name: Upload test build artifact
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: JJS-KODI-Profile-Transfer-Install-test
+          path: |
+            dist/JJS-KODI-Profile-Backup-Restore-Transfer.exe
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Publish GitHub Release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "v1.11"
-          $title = "JJS KODI Profile Backup/Restore, Transfer & Install 1.11"
+          $tag = "v1.12"
+          $title = "JJS KODI Profile Backup/Restore, Transfer & Install 1.12"
           $notes = "Adds local Kodi install/update support for Android and LibreELEC plus explicit Android Kodi uninstall with optional profile backup. Unofficial community tool, provided as-is without warranty or support commitment. Always keep an independent backup of important Kodi profiles."
 
           if (gh release view $tag 2>$null) {
