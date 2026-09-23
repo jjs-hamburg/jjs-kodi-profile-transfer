@@ -159,6 +159,12 @@ def safe_filename_part(value: str) -> str:
     return value or "Kodi"
 
 
+def safe_filename_text(value: str) -> str:
+    value = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "-", value.strip())
+    value = re.sub(r"\s+", " ", value).strip(" .-")
+    return value or "Kodi"
+
+
 def arch_family(value: str) -> str:
     value = (value or "").strip().lower()
     if value in {"aarch64", "arm64-v8a", "arm64"}:
@@ -1370,7 +1376,7 @@ class TransferApp(tk.Tk):
         return code, out, err
 
     # ---------- screenshots ----------
-    def _screenshot_destination(self) -> Path:
+    def _screenshot_destination(self, device: str, ip: str) -> Path:
         root_text = normalize_windows_unc_path(
             self.screenshot_dir_var.get().strip() or str(default_screenshot_dir())
         )
@@ -1380,11 +1386,13 @@ class TransferApp(tk.Tk):
         except Exception as e:
             raise TransferError(f"Screenshot destination folder could not be created: {root}: {e}") from e
 
-        stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-        candidate = root / f"kodi-screenshot-{stamp}.png"
+        device_name = safe_filename_text(device)
+        ip_text = safe_filename_text(ip)
+        stamp = dt.datetime.now().strftime("%y%d%m-%H%M")
+        candidate = root / f"{device_name} ({ip_text})-{stamp}.png"
         n = 2
         while candidate.exists():
-            candidate = root / f"kodi-screenshot-{stamp}-{n}.png"
+            candidate = root / f"{device_name} ({ip_text})-{stamp}-{n}.png"
             n += 1
         return candidate
 
@@ -1412,6 +1420,59 @@ class TransferApp(tk.Tk):
                 crop_right = right_margin if 0 < right_margin <= max_x else 0
                 crop_bottom = bottom_margin if 0 < bottom_margin <= max_y else 0
 
+                # LibreELEC/Kodi screenshots can contain very dark pillarbox borders
+                # that are not mathematically RGB 0,0,0 because a few edge pixels
+                # contain tiny residual values. Detect only a narrow, contiguous
+                # near-black band at the outer edge and require a clear transition
+                # back to real image content. This keeps the crop conservative.
+                exact_box = (
+                    crop_left,
+                    crop_top,
+                    width - crop_right,
+                    height - crop_bottom,
+                )
+                working = image.crop(exact_box)
+                work_w, work_h = working.size
+
+                def edge_band(values: list[float], from_end: bool, max_width: int) -> int:
+                    threshold = 1.25
+                    sequence = list(reversed(values)) if from_end else values
+                    count = 0
+                    for value in sequence:
+                        if value <= threshold and count < max_width:
+                            count += 1
+                        else:
+                            break
+                    if count == 0 or count >= max_width or count >= len(sequence):
+                        return 0
+                    # Do not crop unless the first content sample is clearly brighter
+                    # than the detected border band.
+                    if sequence[count] <= threshold * 1.5:
+                        return 0
+                    return count
+
+                if work_w > 2 and work_h > 2:
+                    column_means_img = working.resize((work_w, 1), Image.Resampling.BOX)
+                    column_means = [
+                        sum(pixel) / 3.0
+                        for pixel in column_means_img.getdata()
+                    ]
+                    row_means_img = working.resize((1, work_h), Image.Resampling.BOX)
+                    row_means = [
+                        sum(pixel) / 3.0
+                        for pixel in row_means_img.getdata()
+                    ]
+
+                    near_left = edge_band(column_means, False, max(2, int(work_w * 0.08)))
+                    near_right = edge_band(column_means, True, max(2, int(work_w * 0.08)))
+                    near_top = edge_band(row_means, False, max(2, int(work_h * 0.08)))
+                    near_bottom = edge_band(row_means, True, max(2, int(work_h * 0.08)))
+
+                    crop_left += near_left
+                    crop_right += near_right
+                    crop_top += near_top
+                    crop_bottom += near_bottom
+
                 if not any((crop_left, crop_top, crop_right, crop_bottom)):
                     return None
 
@@ -1428,7 +1489,7 @@ class TransferApp(tk.Tk):
             self.log(f"WARNING: automatic black-border trimming failed: {e}")
             return None
 
-    def _take_android_screenshot(self) -> bytes:
+    def _take_android_screenshot(self) -> tuple[bytes, str]:
         serial, device = self._connect_android("source")
         adb = self._find_or_install_adb()
         cp = self._run_binary(
@@ -1442,9 +1503,9 @@ class TransferApp(tk.Tk):
             raise TransferError("Android screenshot capture did not return a valid PNG image.")
         label = " ".join(x for x in (device.get("manufacturer", ""), device.get("model", "")) if x).strip()
         self.log(f"Android screenshot captured from {label or serial}.")
-        return data
+        return data, (label or "Android")
 
-    def _take_libreelec_screenshot(self) -> bytes:
+    def _take_libreelec_screenshot(self) -> tuple[bytes, str]:
         client = self._ssh_client("source")
         remote = f"/tmp/jjs-kodi-screenshot-{os.getpid()}-{int(time.time() * 1000)}.png"
         sftp = None
@@ -1490,7 +1551,7 @@ class TransferApp(tk.Tk):
             if not data.startswith(b"\x89PNG\r\n\x1a\n"):
                 raise TransferError("LibreELEC screenshot capture did not return a valid PNG image.")
             self.log(f"LibreELEC screenshot captured via temporary file {remote}.")
-            return data
+            return data, "LibreELEC"
         finally:
             if sftp is not None:
                 try:
@@ -1513,11 +1574,15 @@ class TransferApp(tk.Tk):
         self._set_progress(10, "Connecting")
         self._set_status("screenshot", "Connecting …")
         is_android = str(self._endpoint_vars["source"]["type"].get()).startswith("Android")
+        ip, _port = self._validate_ip_port("source")
         self._set_progress(25, "Capturing screen")
-        data = self._take_android_screenshot() if is_android else self._take_libreelec_screenshot()
+        if is_android:
+            data, device_name = self._take_android_screenshot()
+        else:
+            data, device_name = self._take_libreelec_screenshot()
 
         self._set_progress(75, "Saving PNG")
-        destination = self._screenshot_destination()
+        destination = self._screenshot_destination(device_name, ip)
         try:
             destination.write_bytes(data)
         except Exception as e:
