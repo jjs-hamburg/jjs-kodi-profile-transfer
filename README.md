@@ -2,7 +2,7 @@
 
 Windows toolbox for managing Kodi on **Android / NVIDIA Shield (ADB)** and **LibreELEC (SSH)**.
 
-Current version: **1.13**
+Current version: **1.14**
 
 ## What it does
 
@@ -21,6 +21,14 @@ Current version: **1.13**
   - Android: detect multiple Kodi installations and uninstall a selected one
   - Fresh Android installs: configure microphone and "All files" access where supported
   - LibreELEC: upload a local update TAR to `/storage/.update/` and optionally reboot
+
+- **Back up / restore Kodi databases**
+  - MusicDB and VideoDB independently
+  - MariaDB and local SQLite
+  - Uses the existing JJS Music Library Manager ZIP backup format (version 2)
+  - Automatically detects the active database from the selected Source A Kodi
+  - Verifies backup checksums and schema version before restore
+  - SQLite is stopped, rebuilt and verified before replacing the active DB
 
 - **Take Kodi screenshots**
   - Android: capture directly over ADB; no screenshot file is left on the device
@@ -54,7 +62,7 @@ Current version: **1.13**
 
 Get the current Windows build from:
 
-**Releases → JJS KODI Toolbox 1.13**
+**Releases → JJS KODI Toolbox 1.14**
 
 Files:
 
