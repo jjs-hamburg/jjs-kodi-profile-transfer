@@ -95,6 +95,12 @@ The third application tab captures the current Kodi screen and saves the PNG dir
 
 The connection settings are the same live values used by **Source A** in the Profile tab.
 
+Screenshot filenames use the device and source IP plus the capture time:
+
+`Device (IP)-YYDDMM-HHMM.png`
+
+For example: `LibreELEC (192.168.1.20)-262309-1538.png`.
+
 ### Android / NVIDIA Shield
 
 The screenshot is captured with ADB using Android's screen-capture stream and is written directly to the local PC. No screenshot file is created on the Android device.
@@ -109,7 +115,7 @@ Some LibreELEC/Kodi display backends, especially GBM-based systems, may not supp
 
 ### Black border trimming
 
-Thin completely black outer borders are removed automatically before the PNG is finalized. The trimming is deliberately conservative: only narrow solid-black edge areas are removed, so normal dark Kodi content is not cropped aggressively.
+Thin black outer borders are removed automatically before the PNG is finalized. LibreELEC screenshots can contain edge bands that are visually black but have tiny non-zero pixel values, so the trimming also recognizes narrow contiguous near-black borders with a clear transition to the actual image. The crop remains deliberately limited to narrow outer-edge areas.
 
 ## Supported connections
 
