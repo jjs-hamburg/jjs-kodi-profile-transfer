@@ -1,18 +1,23 @@
-# JJS KODI Profile Backup/Restore, Transfer & Install
+# JJS KODI Toolbox
 
-A Windows tool for managing Kodi installations and profiles on:
+A Windows toolbox for managing Kodi installations, profiles, and screenshots on:
 
 - Android / NVIDIA Shield via ADB
 - LibreELEC via SSH
 
-Current version: **1.12**
+Current version: **1.13**
 
-The application has two separate areas:
+The application name reflects its expanded scope: profile backup/restore/transfer, Kodi installation/update/uninstall, and screenshot capture are combined in one utility.
+
+The application has three separate areas:
 
 - **Profile Backup / Restore / Transfer**
 - **Kodi Install / Update**
+- **Screenshots**
 
-Both tabs show the same target device. Connection type, IP address, port, SSH credentials, and the detected Kodi installations are synchronized so the target does not need to be entered twice.
+The Profile and Install tabs show the same target device. Connection type, IP address, port, SSH credentials, and the detected Kodi installations are synchronized so the target does not need to be entered twice.
+
+The Screenshots tab shares its connection data directly with **Source A** in the Profile tab. Changes made in either place are visible immediately in the other.
 
 All Kodi installation and update files are selected locally. The tool does not download Kodi builds.
 
@@ -86,6 +91,34 @@ If you choose not to restart, the update remains staged and can be installed by 
 
 This function updates an **existing LibreELEC installation**. It does not install LibreELEC onto a blank device.
 
+## Screenshots
+
+The third application tab captures the current Kodi screen and saves the PNG directly to a user-selectable folder on the Windows PC.
+
+The connection settings are the same live values used by **Source A** in the Profile tab.
+
+Screenshot filenames use the device and source IP plus the capture time:
+
+`Device (IP)-YYDDMM-HHMM.png`
+
+For example: `LibreELEC (192.168.1.20)-262309-1538.png`.
+
+### Android / NVIDIA Shield
+
+The screenshot is captured with ADB using Android's screen-capture stream and is written directly to the local PC. No screenshot file is created on the Android device.
+
+### LibreELEC
+
+The tool asks Kodi to create a screenshot in a uniquely named file under `/tmp`, downloads it immediately over the existing SSH connection, and deletes the temporary file in a `finally` cleanup path.
+
+Kodi's LibreELEC screenshot interface requires a filename, so a temporary file exists for the duration of the capture. Nothing is intentionally retained in Kodi's normal screenshot folders or in the Kodi profile.
+
+Some LibreELEC/Kodi display backends, especially GBM-based systems, may not support Kodi screenshots correctly and can return no image or an all-black image. The tool reports a missing screenshot as an error and logs an all-black capture.
+
+### Black border trimming
+
+Thin black outer borders are removed automatically before the PNG is finalized. LibreELEC screenshots can contain edge bands that are visually black but have tiny non-zero pixel values, so the trimming also recognizes narrow contiguous near-black borders with a clear transition to the actual image. The crop remains deliberately limited to narrow outer-edge areas.
+
 ## Supported connections
 
 ### Android / NVIDIA Shield
@@ -110,24 +143,30 @@ SSH host keys are verified and stored locally after first confirmation. SSH pass
 
 ## Windows build
 
-The Windows executable is built automatically with GitHub Actions and PyInstaller.
+The Windows executable is built automatically with GitHub Actions and PyInstaller. Pillow is included for conservative black-border trimming of screenshots.
 
 Download the current executable from:
 
-**Releases → JJS KODI Profile Backup/Restore, Transfer & Install 1.12**
+**Releases → JJS KODI Toolbox 1.13**
 
 Release files:
 
-- `JJS-KODI-Profile-Backup-Restore-Transfer.exe`
+- `JJS-KODI-Toolbox.exe`
 - `SHA256SUMS.txt`
-
-The executable filename is retained for continuity with earlier releases.
 
 The source used for the build is:
 
-`installer/jjs_kodi_profile_transfer.py`
+`installer/jjs_kodi_toolbox.py`
 
 The repository source is the authoritative project state.
+
+## Local application data
+
+JJS KODI Toolbox stores its local configuration, SSH host keys, and logs below:
+
+`%LOCALAPPDATA%\\JJSKodiToolbox\\`
+
+This is intentionally a new application-data location. Existing data from earlier JJS KODI Profile Transfer builds is not migrated or reused. SSH passwords are never stored.
 
 ## Important warning
 
@@ -151,7 +190,7 @@ To the maximum extent permitted by applicable law, the author shall not be liabl
 
 ## License
 
-The JJS KODI Profile Backup/Restore, Transfer & Install source code in this repository is released under the **MIT License**. See [LICENSE](LICENSE).
+The JJS KODI Toolbox source code in this repository is released under the **MIT License**. See [LICENSE](LICENSE).
 
 The Windows executable is built with third-party open-source components and uses external tools such as Android ADB. Those projects remain subject to their own licenses and terms.
 

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""JJS KODI Profile Backup/Restore, Transfer & Install - Windows GUI.
+"""JJS KODI Toolbox - Windows GUI.
 
 The tool backs up, restores, and transfers complete Kodi profiles between Android
 (ADB) and LibreELEC (SSH). It can also install or update a local Kodi APK on Android,
-uninstall a selected Android Kodi package, and stage a local LibreELEC update TAR.
+uninstall a selected Android Kodi package, stage a local LibreELEC update TAR, and
+capture Kodi screenshots to a local Windows folder.
 
 Backup files are uncompressed TAR archives. New backups contain transfer metadata.
 On cross-platform or cross-architecture restore, platform-specific binary add-ons
@@ -44,9 +45,14 @@ try:
 except ImportError:
     paramiko = None
 
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
 
-APP_TITLE = "JJS KODI Profile Backup/Restore, Transfer & Install"
-APP_VERSION = "1.12"
+
+APP_TITLE = "JJS KODI Toolbox"
+APP_VERSION = "1.13"
 META_NAME = "JJS_PROFILE_TRANSFER.json"
 
 DEFAULT_ADB_PORT = 5555
@@ -67,7 +73,7 @@ class TransferError(RuntimeError):
 
 
 def app_root() -> Path:
-    root = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "JJSKodiProfileTransfer"
+    root = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "JJSKodiToolbox"
     root.mkdir(parents=True, exist_ok=True)
     return root
 
@@ -86,6 +92,11 @@ def known_hosts_path() -> Path:
 def default_backup_dir() -> Path:
     docs = Path.home() / "Documents"
     return docs / "Kodi-Profile-Backups"
+
+
+def default_screenshot_dir() -> Path:
+    pictures = Path.home() / "Pictures"
+    return pictures / "Kodi-Screenshots"
 
 
 def normalize_windows_unc_path(value: str) -> str:
@@ -145,6 +156,12 @@ def safe_filename_part(value: str) -> str:
     value = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "-", value)
     value = re.sub(r"\s+", "-", value)
     value = re.sub(r"-+", "-", value).strip(" .-")
+    return value or "Kodi"
+
+
+def safe_filename_text(value: str) -> str:
+    value = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "-", value.strip())
+    value = re.sub(r"\s+", " ", value).strip(" .-")
     return value or "Kodi"
 
 
@@ -220,7 +237,10 @@ class TransferApp(tk.Tk):
         self._endpoint_widgets: dict[str, dict[str, object]] = {}
         self._install_profile_map: dict[str, dict] = {}
         self._action_buttons: list[ttk.Button] = []
-        self._progress_bars: list[ttk.Progressbar] = []
+        self._progress_bars: dict[str, ttk.Progressbar] = {}
+        self._progress_vars: dict[str, tk.StringVar] = {}
+        self._progress_values: dict[str, float] = {}
+        self._active_progress_key: str | None = None
         self._log_widgets: list[tk.Text] = []
 
         self._load_config()
@@ -241,6 +261,7 @@ class TransferApp(tk.Tk):
             "backup_dir": self.backup_dir_var.get().strip(),
             "backup_file": self.backup_file_var.get().strip(),
             "safety_backup": bool(self.safety_backup_var.get()),
+            "screenshot_dir": self.screenshot_dir_var.get().strip(),
             "install_file": self.install_file_var.get().strip(),
             "uninstall_backup": bool(self.uninstall_backup_var.get()),
         }
@@ -268,13 +289,16 @@ class TransferApp(tk.Tk):
         ttk.Label(outer, text=APP_TITLE, font=("Segoe UI", 16, "bold")).pack(anchor="w")
         ttk.Label(
             outer,
-            text="Manage Kodi profiles and install or update Kodi on Android/ADB and LibreELEC/SSH.",
+            text="Manage Kodi profiles, install or update Kodi, and capture screenshots on Android/ADB and LibreELEC/SSH.",
         ).pack(anchor="w", pady=(2, 10))
 
         self.adb_dir_var = tk.StringVar(value=str(self._cfg.get("adb_dir", DEFAULT_ADB_DIR)))
         self.backup_dir_var = tk.StringVar(value=str(self._cfg.get("backup_dir", default_backup_dir())))
         self.backup_file_var = tk.StringVar(value=str(self._cfg.get("backup_file", "")))
         self.safety_backup_var = tk.BooleanVar(value=bool(self._cfg.get("safety_backup", True)))
+        self.screenshot_dir_var = tk.StringVar(
+            value=str(self._cfg.get("screenshot_dir", default_screenshot_dir()))
+        )
         self.install_file_var = tk.StringVar(value=str(self._cfg.get("install_file", "")))
         self.uninstall_backup_var = tk.BooleanVar(value=bool(self._cfg.get("uninstall_backup", True)))
 
@@ -301,11 +325,14 @@ class TransferApp(tk.Tk):
 
         profile_tab = ttk.Frame(notebook, padding=10)
         install_tab = ttk.Frame(notebook, padding=10)
+        screenshot_tab = ttk.Frame(notebook, padding=10)
         notebook.add(profile_tab, text="Profile Backup / Restore / Transfer")
         notebook.add(install_tab, text="Kodi Install / Update")
+        notebook.add(screenshot_tab, text="Screenshots")
 
         self._build_profile_tab(profile_tab)
         self._build_install_tab(install_tab)
+        self._build_screenshot_tab(screenshot_tab)
 
     def _build_profile_tab(self, outer) -> None:
         endpoints = ttk.Frame(outer)
@@ -343,9 +370,17 @@ class TransferApp(tk.Tk):
             b.pack(side="left", padx=(0, 8))
             self._action_buttons.append(b)
 
-        self.profile_progress = ttk.Progressbar(actions, mode="indeterminate", length=220)
+        self.profile_progress = ttk.Progressbar(
+            actions, mode="determinate", maximum=100, length=220
+        )
         self.profile_progress.pack(side="right")
-        self._progress_bars.append(self.profile_progress)
+        self.profile_progress_var = tk.StringVar(value="Ready")
+        ttk.Label(actions, textvariable=self.profile_progress_var, width=24, anchor="e").pack(
+            side="right", padx=(0, 8)
+        )
+        self._progress_bars["profile"] = self.profile_progress
+        self._progress_vars["profile"] = self.profile_progress_var
+        self._progress_values["profile"] = 0.0
 
         status = ttk.LabelFrame(outer, text="Status", padding=8)
         status.pack(fill="x", pady=(0, 10))
@@ -414,9 +449,17 @@ class TransferApp(tk.Tk):
         self.uninstall_button.pack(side="left", padx=(0, 8))
         self._action_buttons.append(self.uninstall_button)
 
-        self.install_progress = ttk.Progressbar(actions, mode="indeterminate", length=220)
+        self.install_progress = ttk.Progressbar(
+            actions, mode="determinate", maximum=100, length=220
+        )
         self.install_progress.pack(side="right")
-        self._progress_bars.append(self.install_progress)
+        self.install_progress_var = tk.StringVar(value="Ready")
+        ttk.Label(actions, textvariable=self.install_progress_var, width=24, anchor="e").pack(
+            side="right", padx=(0, 8)
+        )
+        self._progress_bars["install"] = self.install_progress
+        self._progress_vars["install"] = self.install_progress_var
+        self._progress_values["install"] = 0.0
 
         self.uninstall_backup_check = ttk.Checkbutton(
             outer,
@@ -457,6 +500,156 @@ class TransferApp(tk.Tk):
         self._log_widgets.append(self.install_log_text)
 
         self._install_type_changed(initial=True)
+
+    def _build_screenshot_tab(self, outer) -> None:
+        ttk.Label(
+            outer,
+            text="Uses the same connection data as Source A. Changes in either tab are synchronized immediately.",
+        ).pack(anchor="w", pady=(0, 10))
+
+        connection = ttk.LabelFrame(outer, text="Kodi source", padding=10)
+        connection.pack(fill="x")
+        connection.columnconfigure(1, weight=1)
+        self._build_screenshot_endpoint(connection)
+
+        destination = ttk.LabelFrame(outer, text="Screenshot destination", padding=10)
+        destination.pack(fill="x", pady=(10, 0))
+        destination.columnconfigure(1, weight=1)
+        self._path_row(
+            destination,
+            0,
+            "Folder:",
+            self.screenshot_dir_var,
+            self._browse_screenshot_dir,
+        )
+        ttk.Label(
+            destination,
+            text="Thin solid-black outer borders are removed automatically when possible.",
+        ).grid(row=1, column=1, sticky="w", pady=(2, 0))
+
+        actions = ttk.Frame(outer)
+        actions.pack(fill="x", pady=10)
+
+        self.screenshot_check_button = ttk.Button(
+            actions,
+            text="Check source",
+            command=lambda: self._start_worker(
+                lambda: self._check_endpoint("source"),
+                "screenshot",
+            ),
+        )
+        self.screenshot_check_button.pack(side="left", padx=(0, 8))
+        self._action_buttons.append(self.screenshot_check_button)
+
+        self.screenshot_button = ttk.Button(
+            actions,
+            text="Take Screenshot",
+            command=lambda: self._start_worker(self._take_screenshot, "screenshot"),
+        )
+        self.screenshot_button.pack(side="left", padx=(0, 8))
+        self._action_buttons.append(self.screenshot_button)
+
+        self.screenshot_progress = ttk.Progressbar(
+            actions, mode="determinate", maximum=100, length=220
+        )
+        self.screenshot_progress.pack(side="right")
+        self.screenshot_progress_var = tk.StringVar(value="Ready")
+        ttk.Label(actions, textvariable=self.screenshot_progress_var, width=24, anchor="e").pack(
+            side="right", padx=(0, 8)
+        )
+        self._progress_bars["screenshot"] = self.screenshot_progress
+        self._progress_vars["screenshot"] = self.screenshot_progress_var
+        self._progress_values["screenshot"] = 0.0
+
+        status = ttk.LabelFrame(outer, text="Status", padding=8)
+        status.pack(fill="x", pady=(0, 10))
+        status.columnconfigure(1, weight=1)
+        ttk.Label(status, text="Source:").grid(
+            row=0, column=0, sticky="nw", padx=(0, 10), pady=2
+        )
+        ttk.Label(status, textvariable=self.status_vars["source"]).grid(
+            row=0, column=1, sticky="w", pady=2
+        )
+        ttk.Label(status, text="Screenshot:").grid(
+            row=1, column=0, sticky="nw", padx=(0, 10), pady=2
+        )
+        var = tk.StringVar(value="—")
+        self.status_vars["screenshot"] = var
+        ttk.Label(status, textvariable=var).grid(row=1, column=1, sticky="w", pady=2)
+
+        log_box = ttk.LabelFrame(outer, text="Log", padding=6)
+        log_box.pack(fill="both", expand=True)
+        self.screenshot_log_text = tk.Text(
+            log_box,
+            wrap="word",
+            height=14,
+            font=("Consolas", 9),
+            state="disabled",
+        )
+        scroll = ttk.Scrollbar(log_box, orient="vertical", command=self.screenshot_log_text.yview)
+        self.screenshot_log_text.configure(yscrollcommand=scroll.set)
+        self.screenshot_log_text.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        self._log_widgets.append(self.screenshot_log_text)
+
+    def _build_screenshot_endpoint(self, frame) -> None:
+        source_vars = self._endpoint_vars["source"]
+        type_var = source_vars["type"]
+        ip_var = source_vars["ip"]
+        port_var = source_vars["port"]
+        user_var = source_vars["user"]
+        password_var = source_vars["password"]
+        profile_var = source_vars["profile"]
+
+        ttk.Label(frame, text="Connection:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
+        type_box = ttk.Combobox(
+            frame,
+            textvariable=type_var,
+            values=("Android (ADB)", "LibreELEC (SSH)"),
+            state="readonly",
+            width=18,
+        )
+        type_box.grid(row=0, column=1, sticky="ew", pady=3)
+        type_box.bind("<<ComboboxSelected>>", lambda _e: self._endpoint_type_changed("source"))
+
+        ttk.Label(frame, text="IP:").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=3)
+        iprow = ttk.Frame(frame)
+        iprow.grid(row=1, column=1, sticky="ew", pady=3)
+        iprow.columnconfigure(0, weight=1)
+        ttk.Entry(iprow, textvariable=ip_var).grid(row=0, column=0, sticky="ew")
+        ttk.Label(iprow, text="Port:").grid(row=0, column=1, padx=(8, 4))
+        ttk.Entry(iprow, textvariable=port_var, width=7).grid(row=0, column=2)
+
+        user_label = ttk.Label(frame, text="SSH-User:")
+        user_label.grid(row=2, column=0, sticky="w", padx=(0, 8), pady=3)
+        user_entry = ttk.Entry(frame, textvariable=user_var)
+        user_entry.grid(row=2, column=1, sticky="ew", pady=3)
+
+        pass_label = ttk.Label(frame, text="SSH password:")
+        pass_label.grid(row=3, column=0, sticky="w", padx=(0, 8), pady=3)
+        pass_entry = ttk.Entry(frame, textvariable=password_var, show="●")
+        pass_entry.grid(row=3, column=1, sticky="ew", pady=3)
+
+        ttk.Label(frame, text="Kodi:").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=3)
+        profile_box = ttk.Combobox(frame, textvariable=profile_var)
+        profile_box.grid(row=4, column=1, sticky="ew", pady=3)
+
+        self._endpoint_widgets["screenshot"] = {
+            "profile": profile_box,
+            "ssh_rows": (user_label, user_entry, pass_label, pass_entry),
+        }
+        self._refresh_screenshot_connection_rows()
+
+    def _refresh_screenshot_connection_rows(self) -> None:
+        widgets = self._endpoint_widgets.get("screenshot")
+        if not widgets:
+            return
+        is_android = str(self._endpoint_vars["source"]["type"].get()).startswith("Android")
+        for widget in widgets["ssh_rows"]:
+            if is_android:
+                widget.grid_remove()
+            else:
+                widget.grid()
 
     def _build_install_endpoint(self, frame) -> None:
         # Target B and the Install / Update tab are two views of the same target device.
@@ -684,6 +877,8 @@ class TransferApp(tk.Tk):
             # A profile from the other platform must never survive a connection-type switch.
             v["profile"].set("")
             self._endpoint_widgets[role]["profile"].configure(values=())
+            if role == "source" and "screenshot" in self._endpoint_widgets:
+                self._endpoint_widgets["screenshot"]["profile"].configure(values=())
             if role == "target" and "install" in self._endpoint_widgets:
                 self._endpoint_widgets["install"]["profile"].configure(values=())
 
@@ -699,6 +894,8 @@ class TransferApp(tk.Tk):
 
         if role == "target" and "install" in self._endpoint_widgets:
             self._install_type_changed(initial=initial)
+        if role == "source":
+            self._refresh_screenshot_connection_rows()
 
     def _path_row(self, parent, row: int, label: str, variable: tk.StringVar, command) -> None:
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=3)
@@ -730,6 +927,12 @@ class TransferApp(tk.Tk):
         )
         if p:
             self.backup_file_var.set(p)
+
+    def _browse_screenshot_dir(self) -> None:
+        initial = self.screenshot_dir_var.get() or str(default_screenshot_dir())
+        p = filedialog.askdirectory(initialdir=initial)
+        if p:
+            self.screenshot_dir_var.set(p)
 
     def _browse_install_file(self) -> None:
         is_android = str(self._endpoint_vars["install"]["type"].get()).startswith("Android")
@@ -776,10 +979,20 @@ class TransferApp(tk.Tk):
                     self.status_vars[key].set(text)
                 elif kind == "busy":
                     self._apply_busy(bool(payload))
+                elif kind == "progress":
+                    key, value, label = payload
+                    bar = self._progress_bars.get(key)
+                    var = self._progress_vars.get(key)
+                    if bar is not None:
+                        bar["value"] = value
+                    if var is not None:
+                        var.set(label)
                 elif kind == "profiles":
                     role, values, selected_text, done = payload
                     try:
                         self._endpoint_widgets[role]["profile"].configure(values=values)
+                        if role == "source" and "screenshot" in self._endpoint_widgets:
+                            self._endpoint_widgets["screenshot"]["profile"].configure(values=values)
                         self._endpoint_vars[role]["profile"].set(selected_text)
                     finally:
                         done.set()
@@ -803,16 +1016,42 @@ class TransferApp(tk.Tk):
             pass
         self.after(100, self._drain_ui_queue)
 
+    def _set_progress(
+        self,
+        value: float,
+        text: str = "",
+        key: str | None = None,
+    ) -> None:
+        progress_key = key or self._active_progress_key
+        if not progress_key:
+            return
+        value = max(0.0, min(100.0, float(value)))
+        self._progress_values[progress_key] = value
+        percent = int(round(value))
+        label = f"{percent}%"
+        if text:
+            label += f" – {text}"
+        self._ui_queue.put(("progress", (progress_key, value, label)))
+
+    def _set_progress_fraction(
+        self,
+        start: float,
+        end: float,
+        done: int,
+        total: int,
+        text: str,
+    ) -> None:
+        if total <= 0:
+            self._set_progress(start, text)
+            return
+        fraction = max(0.0, min(1.0, done / total))
+        self._set_progress(start + (end - start) * fraction, text)
+
     def _apply_busy(self, busy: bool) -> None:
         self._busy = busy
         state = "disabled" if busy else "normal"
         for button in self._action_buttons:
             button.configure(state=state)
-        for progress in self._progress_bars:
-            if busy:
-                progress.start(12)
-            else:
-                progress.stop()
         if not busy:
             self._refresh_install_controls()
 
@@ -820,37 +1059,51 @@ class TransferApp(tk.Tk):
         if self._busy:
             return
         self._save_config()
+        progress_key = {
+            "install": "install",
+            "screenshot": "screenshot",
+        }.get(error_status_key, "profile")
+        self._active_progress_key = progress_key
+        self._set_progress(0, "Starting", progress_key)
         self._ui_queue.put(("busy", True))
         threading.Thread(
             target=self._worker_wrapper,
-            args=(fn, error_status_key),
+            args=(fn, error_status_key, progress_key),
             daemon=True,
         ).start()
 
-    def _worker_wrapper(self, fn, error_status_key: str) -> None:
+    def _worker_wrapper(self, fn, error_status_key: str, progress_key: str) -> None:
+        succeeded = False
         try:
             self._prepare_log_file()
             fn()
+            succeeded = True
         except TransferError as e:
             self.log(f"ERROR: {e}")
             if error_status_key in self.status_vars:
                 self._set_status(error_status_key, f"ERROR: {e}")
+            label = "Cancelled" if "cancel" in str(e).lower() else "Error"
+            self._set_progress(self._progress_values.get(progress_key, 0.0), label, progress_key)
             self._ui_queue.put(("message", ("error", APP_TITLE, str(e))))
         except Exception as e:
             self.log(f"UNEXPECTED ERROR: {type(e).__name__}: {e}")
             if error_status_key in self.status_vars:
                 self._set_status(error_status_key, f"ERROR: {type(e).__name__}: {e}")
+            self._set_progress(self._progress_values.get(progress_key, 0.0), "Error", progress_key)
             self._ui_queue.put(
                 ("message", ("error", APP_TITLE, f"Unexpected error:\n\n{type(e).__name__}: {e}"))
             )
         finally:
+            if succeeded:
+                self._set_progress(100, "Complete", progress_key)
+            self._active_progress_key = None
             self._ui_queue.put(("busy", False))
 
     def _prepare_log_file(self) -> None:
         root = app_root() / "Logs"
         root.mkdir(parents=True, exist_ok=True)
         stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-        self._log_file = root / f"profile-transfer-{stamp}.log"
+        self._log_file = root / f"jjs-kodi-toolbox-{stamp}.log"
         self.log(f"{APP_TITLE} {APP_VERSION}")
 
     def _ask_yes_no(self, title: str, message: str) -> bool:
@@ -896,6 +1149,28 @@ class TransferApp(tk.Tk):
                 self.log("  " + line)
         if check and cp.returncode != 0:
             raise TransferError(f"Command failed (code {cp.returncode}): {subprocess.list2cmdline(args)}")
+        return cp
+
+    def _run_binary(
+        self,
+        args: list[str],
+        timeout: int | None = 60,
+    ) -> subprocess.CompletedProcess[bytes]:
+        self.log("$ " + subprocess.list2cmdline(args))
+        try:
+            cp = subprocess.run(
+                args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=timeout,
+                creationflags=CREATE_NO_WINDOW,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise TransferError(f"Timeout while running: {subprocess.list2cmdline(args)}") from e
+        err = (cp.stderr or b"").decode("utf-8", errors="replace").strip()
+        for line in err.splitlines():
+            if line:
+                self.log("  ! " + line)
         return cp
 
     def _find_or_install_adb(self) -> Path:
@@ -1100,6 +1375,233 @@ class TransferApp(tk.Tk):
                 self.log("  ! " + line)
         return code, out, err
 
+    # ---------- screenshots ----------
+    def _screenshot_destination(self, device: str, ip: str) -> Path:
+        root_text = normalize_windows_unc_path(
+            self.screenshot_dir_var.get().strip() or str(default_screenshot_dir())
+        )
+        root = Path(root_text)
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            raise TransferError(f"Screenshot destination folder could not be created: {root}: {e}") from e
+
+        device_name = safe_filename_text(device)
+        ip_text = safe_filename_text(ip)
+        stamp = dt.datetime.now().strftime("%y%d%m-%H%M")
+        candidate = root / f"{device_name} ({ip_text})-{stamp}.png"
+        n = 2
+        while candidate.exists():
+            candidate = root / f"{device_name} ({ip_text})-{stamp}-{n}.png"
+            n += 1
+        return candidate
+
+    def _trim_black_screenshot_borders(self, path: Path) -> tuple[int, int, int, int] | None:
+        if Image is None:
+            self.log("Pillow is unavailable; automatic black-border trimming was skipped.")
+            return None
+        try:
+            with Image.open(path) as source:
+                image = source.convert("RGB")
+                width, height = image.size
+                bbox = image.getbbox()
+                if bbox is None:
+                    self.log("WARNING: the captured screenshot is completely black.")
+                    return None
+
+                left, top, right, bottom = bbox
+                right_margin = width - right
+                bottom_margin = height - bottom
+                max_x = max(1, int(width * 0.08))
+                max_y = max(1, int(height * 0.08))
+
+                crop_left = left if 0 < left <= max_x else 0
+                crop_top = top if 0 < top <= max_y else 0
+                crop_right = right_margin if 0 < right_margin <= max_x else 0
+                crop_bottom = bottom_margin if 0 < bottom_margin <= max_y else 0
+
+                # LibreELEC/Kodi screenshots can contain very dark pillarbox borders
+                # that are not mathematically RGB 0,0,0 because a few edge pixels
+                # contain tiny residual values. Detect only a narrow, contiguous
+                # near-black band at the outer edge and require a clear transition
+                # back to real image content. This keeps the crop conservative.
+                exact_box = (
+                    crop_left,
+                    crop_top,
+                    width - crop_right,
+                    height - crop_bottom,
+                )
+                working = image.crop(exact_box)
+                work_w, work_h = working.size
+
+                def edge_band(values: list[float], from_end: bool, max_width: int) -> int:
+                    threshold = 1.25
+                    sequence = list(reversed(values)) if from_end else values
+                    count = 0
+                    for value in sequence:
+                        if value <= threshold and count < max_width:
+                            count += 1
+                        else:
+                            break
+                    if count == 0 or count >= max_width or count >= len(sequence):
+                        return 0
+                    # Do not crop unless the first content sample is clearly brighter
+                    # than the detected border band.
+                    if sequence[count] <= threshold * 1.5:
+                        return 0
+                    return count
+
+                if work_w > 2 and work_h > 2:
+                    column_means_img = working.resize((work_w, 1), Image.Resampling.BOX)
+                    column_means = [
+                        sum(pixel) / 3.0
+                        for pixel in column_means_img.getdata()
+                    ]
+                    row_means_img = working.resize((1, work_h), Image.Resampling.BOX)
+                    row_means = [
+                        sum(pixel) / 3.0
+                        for pixel in row_means_img.getdata()
+                    ]
+
+                    near_left = edge_band(column_means, False, max(2, int(work_w * 0.08)))
+                    near_right = edge_band(column_means, True, max(2, int(work_w * 0.08)))
+                    near_top = edge_band(row_means, False, max(2, int(work_h * 0.08)))
+                    near_bottom = edge_band(row_means, True, max(2, int(work_h * 0.08)))
+
+                    crop_left += near_left
+                    crop_right += near_right
+                    crop_top += near_top
+                    crop_bottom += near_bottom
+
+                if not any((crop_left, crop_top, crop_right, crop_bottom)):
+                    return None
+
+                box = (
+                    crop_left,
+                    crop_top,
+                    width - crop_right,
+                    height - crop_bottom,
+                )
+                cropped = image.crop(box)
+                cropped.save(path, format="PNG")
+                return crop_left, crop_top, crop_right, crop_bottom
+        except Exception as e:
+            self.log(f"WARNING: automatic black-border trimming failed: {e}")
+            return None
+
+    def _take_android_screenshot(self) -> tuple[bytes, str]:
+        serial, device = self._connect_android("source")
+        adb = self._find_or_install_adb()
+        cp = self._run_binary(
+            [str(adb), "-s", serial, "exec-out", "screencap", "-p"],
+            timeout=30,
+        )
+        if cp.returncode != 0:
+            raise TransferError(f"Android screenshot capture failed (ADB exit code {cp.returncode}).")
+        data = cp.stdout or b""
+        if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise TransferError("Android screenshot capture did not return a valid PNG image.")
+        label = " ".join(x for x in (device.get("manufacturer", ""), device.get("model", "")) if x).strip()
+        self.log(f"Android screenshot captured from {label or serial}.")
+        return data, (label or "Android")
+
+    def _take_libreelec_screenshot(self) -> tuple[bytes, str]:
+        client = self._ssh_client("source")
+        remote = f"/tmp/jjs-kodi-screenshot-{os.getpid()}-{int(time.time() * 1000)}.png"
+        sftp = None
+        try:
+            code, _, _ = self._ssh_exec(
+                client,
+                "command -v kodi-send >/dev/null 2>&1",
+                timeout=20,
+            )
+            if code != 0:
+                raise TransferError("LibreELEC does not provide the kodi-send command.")
+
+            action = f"TakeScreenshot({remote},sync)"
+            code, _, err = self._ssh_exec(
+                client,
+                f"kodi-send --host=127.0.0.1 --action={shlex.quote(action)}",
+                timeout=30,
+            )
+            if code != 0:
+                raise TransferError(
+                    f"Kodi screenshot command failed.{(' ' + err) if err else ''}"
+                )
+
+            sftp = client.open_sftp()
+            deadline = time.monotonic() + 10
+            size = 0
+            while time.monotonic() < deadline:
+                try:
+                    size = int(sftp.stat(remote).st_size)
+                    if size > 8:
+                        break
+                except OSError:
+                    pass
+                time.sleep(0.2)
+            if size <= 8:
+                raise TransferError(
+                    "Kodi did not create a screenshot on LibreELEC. "
+                    "The active Kodi display backend may not support screenshots."
+                )
+
+            with sftp.open(remote, "rb") as handle:
+                data = handle.read()
+            if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+                raise TransferError("LibreELEC screenshot capture did not return a valid PNG image.")
+            self.log(f"LibreELEC screenshot captured via temporary file {remote}.")
+            return data, "LibreELEC"
+        finally:
+            if sftp is not None:
+                try:
+                    sftp.remove(remote)
+                    self.log("Temporary LibreELEC screenshot removed.")
+                except OSError:
+                    self.log(f"WARNING: temporary screenshot could not be removed: {remote}")
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
+            else:
+                try:
+                    self._ssh_exec(client, f"rm -f {shlex.quote(remote)}", timeout=10)
+                except Exception:
+                    pass
+            client.close()
+
+    def _take_screenshot(self) -> None:
+        self._set_progress(10, "Connecting")
+        self._set_status("screenshot", "Connecting …")
+        is_android = str(self._endpoint_vars["source"]["type"].get()).startswith("Android")
+        ip, _port = self._validate_ip_port("source")
+        self._set_progress(25, "Capturing screen")
+        if is_android:
+            data, device_name = self._take_android_screenshot()
+        else:
+            data, device_name = self._take_libreelec_screenshot()
+
+        self._set_progress(75, "Saving PNG")
+        destination = self._screenshot_destination(device_name, ip)
+        try:
+            destination.write_bytes(data)
+        except Exception as e:
+            raise TransferError(f"Screenshot could not be saved: {destination}: {e}") from e
+
+        self._set_progress(88, "Checking borders")
+        margins = self._trim_black_screenshot_borders(destination)
+        if margins:
+            left, top, right, bottom = margins
+            self.log(
+                "Removed solid-black screenshot border "
+                f"(left {left}px, top {top}px, right {right}px, bottom {bottom}px)."
+            )
+
+        self._set_progress(96, "Screenshot saved")
+        size_kib = destination.stat().st_size / 1024
+        self.log(f"Screenshot saved locally: {destination} ({size_kib:.0f} KiB)")
+        self._set_status("screenshot", f"Saved: {destination}")
+
     # ---------- endpoint discovery ----------
     def _profile_display(self, profile: dict) -> str:
         version = profile.get("version", "").strip()
@@ -1127,6 +1629,8 @@ class TransferApp(tk.Tk):
         values = list(mapping.keys())
         if threading.current_thread() is threading.main_thread():
             self._endpoint_widgets[role]["profile"].configure(values=values)
+            if role == "source" and "screenshot" in self._endpoint_widgets:
+                self._endpoint_widgets["screenshot"]["profile"].configure(values=values)
             self._endpoint_vars[role]["profile"].set(selected_text)
         else:
             done = threading.Event()
@@ -1230,10 +1734,13 @@ class TransferApp(tk.Tk):
         return info
 
     def _check_endpoint(self, role: str) -> None:
+        self._set_progress(10, f"Checking {role}")
         self._set_status("result", "Check in progress …")
         info = self._inspect_endpoint(role)
+        self._set_progress(80, "Device identified")
         if role == "target":
             self._sync_checked_target_to_install(info)
+        self._set_progress(95, "Check OK")
         self._set_status("result", "Check OK")
 
     def _sync_checked_target_to_install(self, info: dict) -> None:
@@ -1354,9 +1861,12 @@ class TransferApp(tk.Tk):
         }
 
     def _check_install_target(self) -> None:
+        self._set_progress(10, "Checking device")
         self._set_status("install", "Checking device …")
         info = self._inspect_install_device()
+        self._set_progress(80, "Device identified")
         self._sync_checked_install_to_target(info)
+        self._set_progress(95, "Check OK")
         self._set_status("install", "Check OK")
 
     def _sync_checked_install_to_target(self, info: dict) -> None:
@@ -1415,11 +1925,14 @@ class TransferApp(tk.Tk):
         return profile
 
     def _install_or_update(self) -> None:
+        self._set_progress(5, "Checking installation file")
         path = Path(self.install_file_var.get().strip())
         if not path.is_file():
             raise TransferError(f"Installation file not found: {path}")
 
+        self._set_progress(12, "Checking target")
         info = self._inspect_install_device()
+        self._set_progress(22, "Target ready")
         if info["platform"] == "android":
             if path.suffix.lower() != ".apk":
                 raise TransferError("Android installation requires a local .apk file.")
@@ -1566,8 +2079,10 @@ class TransferApp(tk.Tk):
         ):
             raise TransferError("Installation was cancelled.")
 
+        self._set_progress(30, "Starting Android install")
         self._set_status("install", f"Installing {path.name} …")
         adb = self._find_or_install_adb()
+        self._set_progress(38, "Installing APK")
         cp = self._run(
             [str(adb), "-s", info["serial"], "install", "-r", str(path)],
             timeout=None,
@@ -1581,6 +2096,7 @@ class TransferApp(tk.Tk):
                 )
             raise TransferError(f"APK installation failed.{(' Device: ' + output) if output else ''}")
 
+        self._set_progress(78, "Verifying installation")
         after = self._discover_android_profiles(info["serial"])
         self._publish_install_profiles(after)
         after_map = {p["identifier"]: p for p in after}
@@ -1594,6 +2110,7 @@ class TransferApp(tk.Tk):
 
         if len(new_packages) == 1:
             p = new_packages[0]
+            self._set_progress(88, "Configuring Android permissions")
             self._configure_fresh_android_kodi_permissions(
                 info["serial"],
                 p["identifier"],
@@ -1608,6 +2125,7 @@ class TransferApp(tk.Tk):
         else:
             result = f"APK installed successfully: {path.name}"
 
+        self._set_progress(96, "Installation verified")
         self.log(result)
         self._set_status("install", result)
         self._ui_queue.put(("message", ("info", APP_TITLE, result)))
@@ -1616,6 +2134,7 @@ class TransferApp(tk.Tk):
         if not str(self._endpoint_vars["install"]["type"].get()).startswith("Android"):
             raise TransferError("Uninstall is available only for Android.")
 
+        self._set_progress(8, "Checking Android device")
         selected_text = str(self._endpoint_vars["install"]["profile"].get()).strip()
         info = self._inspect_install_device()
         if selected_text:
@@ -1650,14 +2169,20 @@ class TransferApp(tk.Tk):
 
         if backup_requested and profile["profile_exists"]:
             self.log("Creating profile backup before uninstall …")
-            backup_path, _ = self._create_backup(target, "install")
+            backup_path, _ = self._create_backup(
+                target,
+                "install",
+                progress_range=(18, 58),
+            )
 
+        self._set_progress(68, f"Uninstalling {profile['name']}")
         self._set_status("install", f"Uninstalling {profile['name']} …")
         cp = self._adb(info["serial"], "uninstall", profile["identifier"], timeout=120)
         output = (cp.stdout or "").strip()
         if cp.returncode != 0 or "success" not in output.lower():
             raise TransferError(f"Android uninstall failed.{(' Device: ' + output) if output else ''}")
 
+        self._set_progress(88, "Verifying uninstall")
         remaining = self._discover_android_profiles(info["serial"])
         self._publish_install_profiles(remaining)
         result = f"Uninstalled {profile['name']} ({profile['identifier']})"
@@ -1687,10 +2212,22 @@ class TransferApp(tk.Tk):
             if code != 0:
                 raise TransferError(f"Could not create LibreELEC update folder: {err}")
 
+            self._set_progress(30, "Preparing LibreELEC update")
             self._set_status("install", f"Uploading {path.name} …")
             self.log(f"Uploading update TAR to temporary file: {remote_temp}")
             sftp = client.open_sftp()
-            sftp.put(str(path), remote_temp)
+
+            def upload_progress(transferred: int, total: int) -> None:
+                self._set_progress_fraction(
+                    35,
+                    88,
+                    transferred,
+                    total,
+                    "Uploading update",
+                )
+
+            sftp.put(str(path), remote_temp, callback=upload_progress)
+            self._set_progress(90, "Verifying upload")
             remote_size = sftp.stat(remote_temp).st_size
             local_size = path.stat().st_size
             if remote_size != local_size:
@@ -1698,6 +2235,7 @@ class TransferApp(tk.Tk):
                     f"Uploaded TAR size mismatch: local {local_size} bytes, remote {remote_size} bytes."
                 )
 
+            self._set_progress(94, "Activating update")
             command = (
                 f"rm -f {shlex.quote(remote_final)} && "
                 f"mv {shlex.quote(remote_temp)} {shlex.quote(remote_final)}"
@@ -1927,23 +2465,40 @@ class TransferApp(tk.Tk):
         with tarfile.open(path, "a:") as tf:
             tf.addfile(ti, io.BytesIO(data))
 
-    def _create_backup(self, info: dict, role: str, leave_stopped: bool = False) -> tuple[Path, bool]:
+    def _create_backup(
+        self,
+        info: dict,
+        role: str,
+        leave_stopped: bool = False,
+        progress_range: tuple[float, float] | None = None,
+    ) -> tuple[Path, bool]:
+        progress_start, progress_end = progress_range or (15.0, 92.0)
+
+        def progress(fraction: float, text: str) -> None:
+            value = progress_start + (progress_end - progress_start) * fraction
+            self._set_progress(value, text)
+
+        progress(0.02, "Checking profile")
         if not info["profile_exists"] and not self._profile_nonempty(info, role):
             raise TransferError("The selected Kodi installation does not have a profile to back up yet.")
 
         destination = self._backup_destination(info)
+        progress(0.08, "Preparing backup")
         was_running = self._is_kodi_running(info, role)
         if was_running:
+            progress(0.14, "Stopping Kodi")
             self.log(f"Stopping {info['name']} for a consistent backup …")
             self._stop_kodi(info, role)
             time.sleep(1)
 
         try:
+            progress(0.20, "Transferring profile")
             self.log(f"Backing up complete Kodi profile directly to: {destination}")
             if info["platform"] == "android":
                 self._stream_android_backup(info, destination)
             else:
                 self._stream_ssh_backup(info, role, destination)
+            progress(0.88, "Finalizing backup")
             self._append_metadata(destination, info)
         except Exception:
             try:
@@ -1959,8 +2514,10 @@ class TransferApp(tk.Tk):
             raise
 
         if was_running and not leave_stopped:
+            progress(0.94, "Starting Kodi")
             self._start_kodi(info, role)
 
+        progress(1.0, "Backup complete")
         size_mb = destination.stat().st_size / (1024 * 1024)
         self.log(f"Backup complete: {destination} ({size_mb:.1f} MiB)")
         self._set_status("backup", str(destination))
@@ -2328,7 +2885,9 @@ class TransferApp(tk.Tk):
         target: dict,
         role: str,
         destination_root: str,
+        progress_range: tuple[float, float] | None = None,
     ) -> None:
+        progress_start, progress_end = progress_range or (45.0, 85.0)
         if target["platform"] == "android":
             adb = self._find_or_install_adb()
             self.log("Extracting restore archive locally on Windows …")
@@ -2347,8 +2906,28 @@ class TransferApp(tk.Tk):
                         f"Transferring extracted profile directly to Android staging "
                         f"({len(children)} top-level items) …"
                     )
+
+                    def local_data_size(path: Path) -> int:
+                        if path.is_file():
+                            return path.stat().st_size
+                        total = 0
+                        for item in path.rglob("*"):
+                            if item.is_file():
+                                total += item.stat().st_size
+                        return total
+
+                    child_sizes = {child: local_data_size(child) for child in children}
+                    total_bytes = sum(child_sizes.values())
+                    transferred_bytes = 0
                     remote_root = destination_root.rstrip("/") + "/"
                     for child in children:
+                        self._set_progress_fraction(
+                            progress_start,
+                            progress_end,
+                            transferred_bytes,
+                            total_bytes,
+                            f"Transferring {child.name}",
+                        )
                         cp = self._run(
                             [str(adb), "-s", target["serial"], "push", str(child), remote_root],
                             timeout=None,
@@ -2359,6 +2938,14 @@ class TransferApp(tk.Tk):
                                 f"ADB push failed while transferring {child.name}."
                                 + (f" Device: {detail}" if detail else "")
                             )
+                        transferred_bytes += child_sizes[child]
+                        self._set_progress_fraction(
+                            progress_start,
+                            progress_end,
+                            transferred_bytes,
+                            total_bytes,
+                            "Transferring profile",
+                        )
 
                     for link_type, name, link_target in links:
                         remote_path = destination_root.rstrip("/") + "/" + name
@@ -2391,6 +2978,8 @@ class TransferApp(tk.Tk):
 
         client = self._ssh_client(role)
         root = shlex.quote(destination_root)
+        total_bytes = archive.stat().st_size
+        transferred_bytes = 0
         try:
             self.log(f"$ ssh: tar -xf - -C {root}")
             stdin, stdout, stderr = client.exec_command(f"tar -xf - -C {root}")
@@ -2402,6 +2991,14 @@ class TransferApp(tk.Tk):
                         if not chunk:
                             break
                         stdin.write(chunk)
+                        transferred_bytes += len(chunk)
+                        self._set_progress_fraction(
+                            progress_start,
+                            progress_end,
+                            transferred_bytes,
+                            total_bytes,
+                            "Transferring restore",
+                        )
             except Exception as e:
                 stream_error = e
             finally:
@@ -2540,7 +3137,18 @@ class TransferApp(tk.Tk):
         role: str,
         confirm: bool = True,
         display_backup: Path | None = None,
+        progress_range: tuple[float, float] | None = None,
     ) -> Path | None:
+        progress_start, progress_end = progress_range or (15.0, 94.0)
+
+        def progress(fraction: float, text: str) -> None:
+            value = progress_start + (progress_end - progress_start) * fraction
+            self._set_progress(value, text)
+
+        def progress_value(fraction: float) -> float:
+            return progress_start + (progress_end - progress_start) * fraction
+
+        progress(0.02, "Reading backup")
         shown_backup = display_backup or backup
         meta, legacy_wrapped = self._read_backup(backup)
         full_restore, mode = self._compatibility_mode(meta, target)
@@ -2561,6 +3169,7 @@ class TransferApp(tk.Tk):
             ):
                 raise TransferError("Restore was cancelled.")
 
+        progress(0.08, "Preparing target")
         self._ensure_target_profile(target, role)
         was_running = self._is_kodi_running(target, role)
         safety_path: Path | None = None
@@ -2573,12 +3182,18 @@ class TransferApp(tk.Tk):
         try:
             if self.safety_backup_var.get() and self._profile_nonempty(target, role):
                 self.log("Creating a safety backup of the existing target profile …")
-                safety_path, safety_was_running = self._create_backup(target, role, leave_stopped=True)
+                safety_path, safety_was_running = self._create_backup(
+                    target,
+                    role,
+                    leave_stopped=True,
+                    progress_range=(progress_value(0.10), progress_value(0.34)),
+                )
                 was_running = was_running or safety_was_running
             elif was_running:
                 self._stop_kodi(target, role)
                 time.sleep(1)
 
+            progress(0.36, "Preparing restore staging")
             stage = self._prepare_restore_stage(target, role)
             staged = True
 
@@ -2595,6 +3210,7 @@ class TransferApp(tk.Tk):
                     legacy_wrapped,
                 )
                 prepared_is_temp = True
+                progress(0.45, "Preparing portable add-ons")
                 self._remove_stage_portable_addons(
                     target,
                     role,
@@ -2606,8 +3222,15 @@ class TransferApp(tk.Tk):
                     f"hardware-dependent source add-ons skipped: {len(details['binary_addons'])}."
                 )
 
-            self._extract_archive_to_dir(prepared_archive, target, role, stage)
+            self._extract_archive_to_dir(
+                prepared_archive,
+                target,
+                role,
+                stage,
+                progress_range=(progress_value(0.48), progress_value(0.82)),
+            )
 
+            progress(0.84, "Validating restored profile")
             # New-format backups contain metadata at archive root. It is useful in the
             # backup file, but must not become part of Kodi's live profile.
             self._target_exec(
@@ -2618,18 +3241,22 @@ class TransferApp(tk.Tk):
             )
             self._validate_restore_stage(target, role, stage)
 
+            progress(0.89, "Activating restored profile")
             self.log("Restore transferred completely. Activating new profile …")
             self._activate_restore_stage(target, role)
             swapped = True
             staged = False
 
+            progress(0.94, "Starting Kodi")
             self._start_kodi(target, role)
             time.sleep(3)
             if not self._is_kodi_running(target, role):
                 raise TransferError("Kodi did not start with the restored profile.")
 
+            progress(0.98, "Committing restore")
             self._commit_restore_stage(target, role)
             swapped = False
+            progress(1.0, "Restore complete")
 
             if details["binary_addons"]:
                 self.log("Not copied (hardware-dependent source add-ons): " + ", ".join(details["binary_addons"]))
@@ -2675,18 +3302,25 @@ class TransferApp(tk.Tk):
 
     # ---------- workflows ----------
     def _backup_only(self) -> None:
+        self._set_progress(5, "Checking source")
         self._set_status("result", "Backup in progress …")
         source = self._inspect_endpoint("source")
-        path, _ = self._create_backup(source, "source")
+        path, _ = self._create_backup(
+            source,
+            "source",
+            progress_range=(15, 95),
+        )
         self.backup_file_var.set(str(path))
         self._save_config()
         self._set_status("result", "SUCCESS – Backup created")
         self._ui_queue.put(("message", ("info", APP_TITLE, f"Backup created:\n\n{path}")))
 
     def _restore_only(self) -> None:
+        self._set_progress(5, "Checking target")
         self._set_status("result", "Restore in progress …")
         backup = Path(self.backup_file_var.get().strip())
         target = self._inspect_endpoint("target")
+        self._set_progress(12, "Preparing backup")
         local_backup, temp_copy = self._localize_restore_source(backup)
         try:
             safety = self._restore_backup(
@@ -2695,6 +3329,7 @@ class TransferApp(tk.Tk):
                 "target",
                 confirm=True,
                 display_backup=backup,
+                progress_range=(15, 96),
             )
         finally:
             if temp_copy is not None:
@@ -2716,8 +3351,10 @@ class TransferApp(tk.Tk):
         )
 
     def _transfer(self) -> None:
+        self._set_progress(4, "Checking source")
         self._set_status("result", "Transfer A → B in progress …")
         source = self._inspect_endpoint("source")
+        self._set_progress(8, "Checking target")
         target = self._inspect_endpoint("target")
         if self._same_endpoint(source, target):
             raise TransferError("Source and target are the same Kodi installation.")
@@ -2730,7 +3367,11 @@ class TransferApp(tk.Tk):
         ):
             raise TransferError("Transfer was cancelled.")
 
-        backup, _ = self._create_backup(source, "source")
+        backup, _ = self._create_backup(
+            source,
+            "source",
+            progress_range=(12, 40),
+        )
         self.backup_file_var.set(str(backup))
         self._save_config()
         local_backup, temp_copy = self._localize_restore_source(backup)
@@ -2741,6 +3382,7 @@ class TransferApp(tk.Tk):
                 "target",
                 confirm=False,
                 display_backup=backup,
+                progress_range=(42, 96),
             )
         finally:
             if temp_copy is not None:

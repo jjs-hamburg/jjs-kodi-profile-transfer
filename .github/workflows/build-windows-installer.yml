@@ -1,4 +1,4 @@
-name: "Build Windows JJS KODI Profile Transfer and Install EXE"
+name: "Build Windows JJS KODI Toolbox EXE"
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
     branches:
       - main
     paths:
-      - "installer/jjs_kodi_profile_transfer.py"
+      - "installer/jjs_kodi_toolbox.py"
       - ".github/workflows/build-windows-installer.yml"
       - "README.md"
       - "LICENSE"
@@ -14,7 +14,7 @@ on:
     branches:
       - main
     paths:
-      - "installer/jjs_kodi_profile_transfer.py"
+      - "installer/jjs_kodi_toolbox.py"
       - ".github/workflows/build-windows-installer.yml"
       - "README.md"
       - "LICENSE"
@@ -38,18 +38,19 @@ jobs:
 
       - name: Install build dependencies
         shell: pwsh
-        run: python -m pip install --disable-pip-version-check pyinstaller==6.16.0 paramiko==5.0.0
+        run: python -m pip install --disable-pip-version-check pyinstaller==6.16.0 paramiko==5.0.0 pillow==12.3.0
 
       - name: Syntax and import check
         shell: pwsh
         run: |
-          python -m py_compile installer/jjs_kodi_profile_transfer.py
-          python -c "from pathlib import Path; s=Path(\'installer/jjs_kodi_profile_transfer.py\').read_text(encoding=\'utf-8\'); assert r\'\\n            command =\' not in s, \'literal escaped newline found\'"
-          python -c "import installer.jjs_kodi_profile_transfer as m; assert m.APP_VERSION == '1.12'; print(m.APP_TITLE, m.APP_VERSION)"
-          python -c "from pathlib import Path; s=Path('installer/jjs_kodi_profile_transfer.py').read_text(encoding='utf-8'); assert 'Transferring restore archive as a file to Android' not in s; assert 'Direct Android profile transfer completed.' in s"
-          python -c "import installer.jjs_kodi_profile_transfer as m; assert m.normalize_windows_unc_path('//MEDIA-NAS/mce/test.tar') == r'\\MEDIA-NAS\mce\test.tar'; assert m.replace_unc_server('//MEDIA-NAS/mce/test.tar', '192.0.2.10') == r'\\192.0.2.10\mce\test.tar'; print('UNC normalization/fallback OK')"
-          python -c "from pathlib import Path; s=Path('installer/jjs_kodi_profile_transfer.py').read_text(encoding='utf-8'); assert 'same platform - full restore' in s; assert 'Preserved target Addons*.db' in s; assert 'binary addon settings' in s; print('Cross-platform addon policy OK')"
-          python -c "from pathlib import Path; s=Path('installer/jjs_kodi_profile_transfer.py').read_text(encoding='utf-8'); assert 'def _install_android_apk' in s; assert 'def _uninstall_android_kodi' in s; assert '/storage/.update/' in s; assert 'The existing app was NOT uninstalled.' in s; print('Install/update safety paths OK')"
+          python -m py_compile installer/jjs_kodi_toolbox.py
+          python -c "from pathlib import Path; s=Path(\'installer/jjs_kodi_toolbox.py\').read_text(encoding=\'utf-8\'); assert r\'\\n            command =\' not in s, \'literal escaped newline found\'"
+          python -c "import installer.jjs_kodi_toolbox as m; assert m.APP_VERSION == '1.13'; assert m.Image is not None; print(m.APP_TITLE, m.APP_VERSION)"
+          python -c "from pathlib import Path; s=Path('installer/jjs_kodi_toolbox.py').read_text(encoding='utf-8'); assert 'Transferring restore archive as a file to Android' not in s; assert 'Direct Android profile transfer completed.' in s"
+          python -c "import installer.jjs_kodi_toolbox as m; assert m.normalize_windows_unc_path('//MEDIA-NAS/mce/test.tar') == r'\\MEDIA-NAS\mce\test.tar'; assert m.replace_unc_server('//MEDIA-NAS/mce/test.tar', '192.0.2.10') == r'\\192.0.2.10\mce\test.tar'; print('UNC normalization/fallback OK')"
+          python -c "from pathlib import Path; s=Path('installer/jjs_kodi_toolbox.py').read_text(encoding='utf-8'); assert 'same platform - full restore' in s; assert 'Preserved target Addons*.db' in s; assert 'binary addon settings' in s; print('Cross-platform addon policy OK')"
+          python -c "from pathlib import Path; s=Path('installer/jjs_kodi_toolbox.py').read_text(encoding='utf-8'); assert 'def _install_android_apk' in s; assert 'def _uninstall_android_kodi' in s; assert '/storage/.update/' in s; assert 'The existing app was NOT uninstalled.' in s; print('Install/update safety paths OK')"
+          python -c "from pathlib import Path; s=Path('installer/jjs_kodi_toolbox.py').read_text(encoding='utf-8'); assert 'def _build_screenshot_tab' in s; assert 'def _take_android_screenshot' in s; assert 'screencap' in s; assert 'TakeScreenshot({remote},sync)' in s; assert 'Temporary LibreELEC screenshot removed.' in s; print('Screenshot paths OK')"
 
       - name: Build single EXE
         shell: pwsh
@@ -60,23 +61,23 @@ jobs:
           --onefile
           --windowed
           --collect-all paramiko
-          --name JJS-KODI-Profile-Backup-Restore-Transfer
-          installer/jjs_kodi_profile_transfer.py
+          --name JJS-KODI-Toolbox
+          installer/jjs_kodi_toolbox.py
 
       - name: Create SHA256SUMS
         shell: pwsh
         run: |
-          $hash = (Get-FileHash dist/JJS-KODI-Profile-Backup-Restore-Transfer.exe -Algorithm SHA256).Hash.ToLower()
-          "$hash  JJS-KODI-Profile-Backup-Restore-Transfer.exe" | Set-Content -Encoding ascii dist/SHA256SUMS.txt
+          $hash = (Get-FileHash dist/JJS-KODI-Toolbox.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  JJS-KODI-Toolbox.exe" | Set-Content -Encoding ascii dist/SHA256SUMS.txt
           Get-Content dist/SHA256SUMS.txt
 
       - name: Upload test build artifact
         if: github.event_name == 'pull_request'
         uses: actions/upload-artifact@v4
         with:
-          name: JJS-KODI-Profile-Transfer-Install-test
+          name: JJS-KODI-Toolbox-test
           path: |
-            dist/JJS-KODI-Profile-Backup-Restore-Transfer.exe
+            dist/JJS-KODI-Toolbox.exe
             dist/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 7
@@ -87,12 +88,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "v1.12"
-          $title = "JJS KODI Profile Backup/Restore, Transfer & Install 1.12"
-          $notes = "Adds local Kodi install/update support for Android and LibreELEC plus explicit Android Kodi uninstall with optional profile backup. Unofficial community tool, provided as-is without warranty or support commitment. Always keep an independent backup of important Kodi profiles."
+          $tag = "v1.13"
+          $title = "JJS KODI Toolbox 1.13"
+          $notes = "JJS KODI Toolbox combines profile backup/restore/transfer, Kodi install/update/uninstall, and screenshots in one Windows utility. The Screenshots tab shares Source A connection data. Android screenshots are captured directly over ADB; LibreELEC uses a temporary /tmp screenshot that is downloaded and removed immediately. Thin black outer borders are trimmed automatically. Unofficial community tool, provided as-is without warranty or support commitment."
 
           if (gh release view $tag 2>$null) {
-            gh release upload $tag dist/JJS-KODI-Profile-Backup-Restore-Transfer.exe dist/SHA256SUMS.txt --clobber
+            gh release upload $tag dist/JJS-KODI-Toolbox.exe dist/SHA256SUMS.txt --clobber
           } else {
-            gh release create $tag dist/JJS-KODI-Profile-Backup-Restore-Transfer.exe dist/SHA256SUMS.txt --title $title --notes $notes
+            gh release create $tag dist/JJS-KODI-Toolbox.exe dist/SHA256SUMS.txt --title $title --notes $notes
           }
