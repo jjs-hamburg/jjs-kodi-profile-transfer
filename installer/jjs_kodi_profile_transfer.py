@@ -231,7 +231,10 @@ class TransferApp(tk.Tk):
         self._endpoint_widgets: dict[str, dict[str, object]] = {}
         self._install_profile_map: dict[str, dict] = {}
         self._action_buttons: list[ttk.Button] = []
-        self._progress_bars: list[ttk.Progressbar] = []
+        self._progress_bars: dict[str, ttk.Progressbar] = {}
+        self._progress_vars: dict[str, tk.StringVar] = {}
+        self._progress_values: dict[str, float] = {}
+        self._active_progress_key: str | None = None
         self._log_widgets: list[tk.Text] = []
 
         self._load_config()
@@ -361,9 +364,17 @@ class TransferApp(tk.Tk):
             b.pack(side="left", padx=(0, 8))
             self._action_buttons.append(b)
 
-        self.profile_progress = ttk.Progressbar(actions, mode="indeterminate", length=220)
+        self.profile_progress = ttk.Progressbar(
+            actions, mode="determinate", maximum=100, length=220
+        )
         self.profile_progress.pack(side="right")
-        self._progress_bars.append(self.profile_progress)
+        self.profile_progress_var = tk.StringVar(value="Ready")
+        ttk.Label(actions, textvariable=self.profile_progress_var, width=24, anchor="e").pack(
+            side="right", padx=(0, 8)
+        )
+        self._progress_bars["profile"] = self.profile_progress
+        self._progress_vars["profile"] = self.profile_progress_var
+        self._progress_values["profile"] = 0.0
 
         status = ttk.LabelFrame(outer, text="Status", padding=8)
         status.pack(fill="x", pady=(0, 10))
@@ -432,9 +443,17 @@ class TransferApp(tk.Tk):
         self.uninstall_button.pack(side="left", padx=(0, 8))
         self._action_buttons.append(self.uninstall_button)
 
-        self.install_progress = ttk.Progressbar(actions, mode="indeterminate", length=220)
+        self.install_progress = ttk.Progressbar(
+            actions, mode="determinate", maximum=100, length=220
+        )
         self.install_progress.pack(side="right")
-        self._progress_bars.append(self.install_progress)
+        self.install_progress_var = tk.StringVar(value="Ready")
+        ttk.Label(actions, textvariable=self.install_progress_var, width=24, anchor="e").pack(
+            side="right", padx=(0, 8)
+        )
+        self._progress_bars["install"] = self.install_progress
+        self._progress_vars["install"] = self.install_progress_var
+        self._progress_values["install"] = 0.0
 
         self.uninstall_backup_check = ttk.Checkbutton(
             outer,
@@ -505,6 +524,17 @@ class TransferApp(tk.Tk):
         actions = ttk.Frame(outer)
         actions.pack(fill="x", pady=10)
 
+        self.screenshot_check_button = ttk.Button(
+            actions,
+            text="Check source",
+            command=lambda: self._start_worker(
+                lambda: self._check_endpoint("source"),
+                "screenshot",
+            ),
+        )
+        self.screenshot_check_button.pack(side="left", padx=(0, 8))
+        self._action_buttons.append(self.screenshot_check_button)
+
         self.screenshot_button = ttk.Button(
             actions,
             text="Take Screenshot",
@@ -513,19 +543,33 @@ class TransferApp(tk.Tk):
         self.screenshot_button.pack(side="left", padx=(0, 8))
         self._action_buttons.append(self.screenshot_button)
 
-        self.screenshot_progress = ttk.Progressbar(actions, mode="indeterminate", length=220)
+        self.screenshot_progress = ttk.Progressbar(
+            actions, mode="determinate", maximum=100, length=220
+        )
         self.screenshot_progress.pack(side="right")
-        self._progress_bars.append(self.screenshot_progress)
+        self.screenshot_progress_var = tk.StringVar(value="Ready")
+        ttk.Label(actions, textvariable=self.screenshot_progress_var, width=24, anchor="e").pack(
+            side="right", padx=(0, 8)
+        )
+        self._progress_bars["screenshot"] = self.screenshot_progress
+        self._progress_vars["screenshot"] = self.screenshot_progress_var
+        self._progress_values["screenshot"] = 0.0
 
         status = ttk.LabelFrame(outer, text="Status", padding=8)
         status.pack(fill="x", pady=(0, 10))
         status.columnconfigure(1, weight=1)
-        ttk.Label(status, text="Screenshot:").grid(
+        ttk.Label(status, text="Source:").grid(
             row=0, column=0, sticky="nw", padx=(0, 10), pady=2
+        )
+        ttk.Label(status, textvariable=self.status_vars["source"]).grid(
+            row=0, column=1, sticky="w", pady=2
+        )
+        ttk.Label(status, text="Screenshot:").grid(
+            row=1, column=0, sticky="nw", padx=(0, 10), pady=2
         )
         var = tk.StringVar(value="—")
         self.status_vars["screenshot"] = var
-        ttk.Label(status, textvariable=var).grid(row=0, column=1, sticky="w", pady=2)
+        ttk.Label(status, textvariable=var).grid(row=1, column=1, sticky="w", pady=2)
 
         log_box = ttk.LabelFrame(outer, text="Log", padding=6)
         log_box.pack(fill="both", expand=True)
@@ -549,6 +593,7 @@ class TransferApp(tk.Tk):
         port_var = source_vars["port"]
         user_var = source_vars["user"]
         password_var = source_vars["password"]
+        profile_var = source_vars["profile"]
 
         ttk.Label(frame, text="Connection:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
         type_box = ttk.Combobox(
@@ -579,19 +624,13 @@ class TransferApp(tk.Tk):
         pass_entry = ttk.Entry(frame, textvariable=password_var, show="●")
         pass_entry.grid(row=3, column=1, sticky="ew", pady=3)
 
-        adb_label = ttk.Label(frame, text="ADB folder:")
-        adb_label.grid(row=4, column=0, sticky="w", padx=(0, 8), pady=3)
-        adb_holder = ttk.Frame(frame)
-        adb_holder.grid(row=4, column=1, sticky="ew", pady=3)
-        adb_holder.columnconfigure(0, weight=1)
-        ttk.Entry(adb_holder, textvariable=self.adb_dir_var).grid(row=0, column=0, sticky="ew")
-        ttk.Button(adb_holder, text="Browse…", command=self._browse_adb_dir, takefocus=False).grid(
-            row=0, column=1, padx=(6, 0)
-        )
+        ttk.Label(frame, text="Kodi:").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=3)
+        profile_box = ttk.Combobox(frame, textvariable=profile_var)
+        profile_box.grid(row=4, column=1, sticky="ew", pady=3)
 
         self._endpoint_widgets["screenshot"] = {
+            "profile": profile_box,
             "ssh_rows": (user_label, user_entry, pass_label, pass_entry),
-            "adb_rows": (adb_label, adb_holder),
         }
         self._refresh_screenshot_connection_rows()
 
@@ -605,11 +644,6 @@ class TransferApp(tk.Tk):
                 widget.grid_remove()
             else:
                 widget.grid()
-        for widget in widgets["adb_rows"]:
-            if is_android:
-                widget.grid()
-            else:
-                widget.grid_remove()
 
     def _build_install_endpoint(self, frame) -> None:
         # Target B and the Install / Update tab are two views of the same target device.
@@ -837,6 +871,8 @@ class TransferApp(tk.Tk):
             # A profile from the other platform must never survive a connection-type switch.
             v["profile"].set("")
             self._endpoint_widgets[role]["profile"].configure(values=())
+            if role == "source" and "screenshot" in self._endpoint_widgets:
+                self._endpoint_widgets["screenshot"]["profile"].configure(values=())
             if role == "target" and "install" in self._endpoint_widgets:
                 self._endpoint_widgets["install"]["profile"].configure(values=())
 
@@ -937,10 +973,20 @@ class TransferApp(tk.Tk):
                     self.status_vars[key].set(text)
                 elif kind == "busy":
                     self._apply_busy(bool(payload))
+                elif kind == "progress":
+                    key, value, label = payload
+                    bar = self._progress_bars.get(key)
+                    var = self._progress_vars.get(key)
+                    if bar is not None:
+                        bar["value"] = value
+                    if var is not None:
+                        var.set(label)
                 elif kind == "profiles":
                     role, values, selected_text, done = payload
                     try:
                         self._endpoint_widgets[role]["profile"].configure(values=values)
+                        if role == "source" and "screenshot" in self._endpoint_widgets:
+                            self._endpoint_widgets["screenshot"]["profile"].configure(values=values)
                         self._endpoint_vars[role]["profile"].set(selected_text)
                     finally:
                         done.set()
@@ -964,16 +1010,42 @@ class TransferApp(tk.Tk):
             pass
         self.after(100, self._drain_ui_queue)
 
+    def _set_progress(
+        self,
+        value: float,
+        text: str = "",
+        key: str | None = None,
+    ) -> None:
+        progress_key = key or self._active_progress_key
+        if not progress_key:
+            return
+        value = max(0.0, min(100.0, float(value)))
+        self._progress_values[progress_key] = value
+        percent = int(round(value))
+        label = f"{percent}%"
+        if text:
+            label += f" – {text}"
+        self._ui_queue.put(("progress", (progress_key, value, label)))
+
+    def _set_progress_fraction(
+        self,
+        start: float,
+        end: float,
+        done: int,
+        total: int,
+        text: str,
+    ) -> None:
+        if total <= 0:
+            self._set_progress(start, text)
+            return
+        fraction = max(0.0, min(1.0, done / total))
+        self._set_progress(start + (end - start) * fraction, text)
+
     def _apply_busy(self, busy: bool) -> None:
         self._busy = busy
         state = "disabled" if busy else "normal"
         for button in self._action_buttons:
             button.configure(state=state)
-        for progress in self._progress_bars:
-            if busy:
-                progress.start(12)
-            else:
-                progress.stop()
         if not busy:
             self._refresh_install_controls()
 
@@ -981,30 +1053,44 @@ class TransferApp(tk.Tk):
         if self._busy:
             return
         self._save_config()
+        progress_key = {
+            "install": "install",
+            "screenshot": "screenshot",
+        }.get(error_status_key, "profile")
+        self._active_progress_key = progress_key
+        self._set_progress(0, "Starting", progress_key)
         self._ui_queue.put(("busy", True))
         threading.Thread(
             target=self._worker_wrapper,
-            args=(fn, error_status_key),
+            args=(fn, error_status_key, progress_key),
             daemon=True,
         ).start()
 
-    def _worker_wrapper(self, fn, error_status_key: str) -> None:
+    def _worker_wrapper(self, fn, error_status_key: str, progress_key: str) -> None:
+        succeeded = False
         try:
             self._prepare_log_file()
             fn()
+            succeeded = True
         except TransferError as e:
             self.log(f"ERROR: {e}")
             if error_status_key in self.status_vars:
                 self._set_status(error_status_key, f"ERROR: {e}")
+            label = "Cancelled" if "cancel" in str(e).lower() else "Error"
+            self._set_progress(self._progress_values.get(progress_key, 0.0), label, progress_key)
             self._ui_queue.put(("message", ("error", APP_TITLE, str(e))))
         except Exception as e:
             self.log(f"UNEXPECTED ERROR: {type(e).__name__}: {e}")
             if error_status_key in self.status_vars:
                 self._set_status(error_status_key, f"ERROR: {type(e).__name__}: {e}")
+            self._set_progress(self._progress_values.get(progress_key, 0.0), "Error", progress_key)
             self._ui_queue.put(
                 ("message", ("error", APP_TITLE, f"Unexpected error:\n\n{type(e).__name__}: {e}"))
             )
         finally:
+            if succeeded:
+                self._set_progress(100, "Complete", progress_key)
+            self._active_progress_key = None
             self._ui_queue.put(("busy", False))
 
     def _prepare_log_file(self) -> None:
@@ -1473,6 +1559,8 @@ class TransferApp(tk.Tk):
         values = list(mapping.keys())
         if threading.current_thread() is threading.main_thread():
             self._endpoint_widgets[role]["profile"].configure(values=values)
+            if role == "source" and "screenshot" in self._endpoint_widgets:
+                self._endpoint_widgets["screenshot"]["profile"].configure(values=values)
             self._endpoint_vars[role]["profile"].set(selected_text)
         else:
             done = threading.Event()
