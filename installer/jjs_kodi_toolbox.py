@@ -1787,6 +1787,411 @@ class TransferApp(tk.Tk):
         self.log(f"Screenshot saved locally: {destination} ({size_kib:.0f} KiB)")
         self._set_status("screenshot", f"Saved: {destination}")
 
+    # ---------- database backup / restore ----------
+    def _database_remote_path(self, info: dict, relative: str) -> str:
+        return str(PurePosixPath(info["profile_root"]) / PurePosixPath(relative))
+
+    def _database_read_remote_bytes(self, info: dict, remote_path: str) -> bytes | None:
+        if info["platform"] == "android":
+            cp = self._run_binary(
+                [str(self._find_or_install_adb()), "-s", info["serial"], "exec-out", "cat", remote_path],
+                timeout=30,
+            )
+            if cp.returncode != 0:
+                return None
+            return bytes(cp.stdout or b"")
+
+        client = self._ssh_client("source")
+        sftp = None
+        try:
+            sftp = client.open_sftp()
+            try:
+                with sftp.open(remote_path, "rb") as handle:
+                    return bytes(handle.read())
+            except OSError:
+                return None
+        finally:
+            if sftp is not None:
+                sftp.close()
+            client.close()
+
+    def _database_list_sqlite_files(self, info: dict) -> list[str]:
+        database_dir = self._database_remote_path(info, "userdata/Database")
+        if info["platform"] == "android":
+            command = f"ls -1 {shlex.quote(database_dir)}/*.db 2>/dev/null"
+            cp = self._adb(info["serial"], "shell", command, timeout=30)
+            if cp.returncode != 0 and not (cp.stdout or "").strip():
+                return []
+            return [
+                PurePosixPath(line.strip()).name
+                for line in (cp.stdout or "").splitlines()
+                if line.strip().lower().endswith(".db")
+            ]
+
+        client = self._ssh_client("source")
+        sftp = None
+        try:
+            sftp = client.open_sftp()
+            try:
+                return [name for name in sftp.listdir(database_dir) if str(name).lower().endswith(".db")]
+            except OSError:
+                return []
+        finally:
+            if sftp is not None:
+                sftp.close()
+            client.close()
+
+    def _database_download_remote(self, info: dict, remote_path: str, local_path: Path) -> None:
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        if info["platform"] == "android":
+            cp = self._run(
+                [str(self._find_or_install_adb()), "-s", info["serial"], "pull", remote_path, str(local_path)],
+                timeout=180,
+            )
+            if cp.returncode != 0 or not local_path.is_file():
+                raise TransferError(f"Could not download SQLite database: {remote_path}")
+            return
+
+        client = self._ssh_client("source")
+        sftp = None
+        try:
+            sftp = client.open_sftp()
+            try:
+                size = int(sftp.stat(remote_path).st_size)
+            except OSError as exc:
+                raise TransferError(f"SQLite database does not exist: {remote_path}") from exc
+
+            def callback(done, total):
+                self._set_progress_fraction(12, 35, int(done), int(total or size), "Downloading SQLite DB")
+
+            sftp.get(remote_path, str(local_path), callback=callback)
+        finally:
+            if sftp is not None:
+                sftp.close()
+            client.close()
+
+    def _database_upload_sqlite(self, info: dict, local_path: Path, remote_path: str) -> None:
+        remote_tmp = remote_path + ".jjs-toolbox-new"
+        wal = remote_path + "-wal"
+        shm = remote_path + "-shm"
+        if info["platform"] == "android":
+            cp = self._run(
+                [str(self._find_or_install_adb()), "-s", info["serial"], "push", str(local_path), remote_tmp],
+                timeout=180,
+            )
+            if cp.returncode != 0:
+                raise TransferError("Could not upload restored SQLite database.")
+            command = (
+                f"rm -f {shlex.quote(wal)} {shlex.quote(shm)} && "
+                f"mv -f {shlex.quote(remote_tmp)} {shlex.quote(remote_path)}"
+            )
+            cp = self._adb(info["serial"], "shell", command, timeout=60)
+            if cp.returncode != 0:
+                self._adb(info["serial"], "shell", f"rm -f {shlex.quote(remote_tmp)}", timeout=20)
+                raise TransferError("Could not replace the active SQLite database.")
+            return
+
+        client = self._ssh_client("source")
+        sftp = None
+        try:
+            sftp = client.open_sftp()
+
+            def callback(done, total):
+                self._set_progress_fraction(82, 94, int(done), int(total), "Uploading restored SQLite DB")
+
+            sftp.put(str(local_path), remote_tmp, callback=callback)
+            for sidecar in (wal, shm):
+                try:
+                    sftp.remove(sidecar)
+                except OSError:
+                    pass
+            try:
+                sftp.remove(remote_path)
+            except OSError:
+                pass
+            sftp.rename(remote_tmp, remote_path)
+        except Exception:
+            if sftp is not None:
+                try:
+                    sftp.remove(remote_tmp)
+                except OSError:
+                    pass
+            raise
+        finally:
+            if sftp is not None:
+                sftp.close()
+            client.close()
+
+    def _database_stop_kodi(self, info: dict) -> None:
+        if info["platform"] == "android":
+            cp = self._adb(
+                info["serial"], "shell", "am", "force-stop", info["identifier"], timeout=30
+            )
+            if cp.returncode != 0:
+                raise TransferError(f"Could not stop {info['identifier']} before database operation.")
+            self.log(f"Kodi stopped: {info['identifier']}")
+            return
+
+        client = self._ssh_client("source")
+        try:
+            code, _out, err = self._ssh_exec(client, "systemctl stop kodi", timeout=60)
+            if code != 0:
+                raise TransferError(f"Could not stop Kodi on LibreELEC.{(' ' + err) if err else ''}")
+            self.log("Kodi stopped on LibreELEC.")
+        finally:
+            client.close()
+
+    def _database_start_kodi(self, info: dict) -> None:
+        if info["platform"] == "android":
+            cp = self._adb(
+                info["serial"],
+                "shell",
+                "monkey",
+                "-p",
+                info["identifier"],
+                "-c",
+                "android.intent.category.LAUNCHER",
+                "1",
+                timeout=30,
+            )
+            if cp.returncode == 0:
+                self.log(f"Kodi restarted: {info['identifier']}")
+            else:
+                self.log(
+                    f"NOTE: {info['identifier']} could not be relaunched automatically; start Kodi manually."
+                )
+            return
+
+        client = self._ssh_client("source")
+        try:
+            code, _out, err = self._ssh_exec(client, "systemctl start kodi", timeout=60)
+            if code != 0:
+                raise TransferError(f"Could not restart Kodi on LibreELEC.{(' ' + err) if err else ''}")
+            self.log("Kodi restarted on LibreELEC.")
+        finally:
+            client.close()
+
+    def _database_config(self, info: dict, kind: str) -> dict:
+        advanced = self._database_remote_path(info, "userdata/advancedsettings.xml")
+        raw = self._database_read_remote_bytes(info, advanced)
+        if raw:
+            try:
+                xml_text = raw.decode("utf-8-sig", errors="replace")
+                cfg = kodi_db.parse_advancedsettings(xml_text, kind)
+            except Exception as exc:
+                raise TransferError(f"Could not parse advancedsettings.xml: {exc}") from exc
+            if cfg is not None:
+                return {"engine": "mariadb", "config": cfg}
+
+        names = self._database_list_sqlite_files(info)
+        try:
+            filename = kodi_db.discover_sqlite_filename(names, kind)
+        except Exception as exc:
+            raise TransferError(str(exc)) from exc
+        return {
+            "engine": "sqlite",
+            "filename": filename,
+            "remote_path": self._database_remote_path(info, f"userdata/Database/{filename}"),
+        }
+
+    def _database_describe(self, info: dict, kind: str) -> dict:
+        context = self._database_config(info, kind)
+        if context["engine"] == "mariadb":
+            try:
+                db_name, version = kodi_db.discover_mariadb(context["config"], kind)
+            except Exception as exc:
+                raise TransferError(f"{kind.title()}DB MariaDB discovery failed: {exc}") from exc
+            return {
+                **context,
+                "database": db_name,
+                "schema_version": version,
+                "text": (
+                    f"MariaDB | {context['config']['host']}:{context['config']['port']} | "
+                    f"{db_name} | schema {version}"
+                ),
+            }
+
+        filename = context["filename"]
+        match = re.search(r"(\d+)\.db$", filename, flags=re.IGNORECASE)
+        suffix = match.group(1) if match else "?"
+        return {
+            **context,
+            "database": Path(filename).stem,
+            "schema_version": int(suffix) if suffix.isdigit() else -1,
+            "text": f"SQLite | {filename}",
+        }
+
+    def _check_databases(self) -> None:
+        self._set_progress(5, "Checking source")
+        info = self._inspect_endpoint("source")
+        self._set_status(
+            "database_source",
+            f"{info['device']} | {info['name']} | {info['identifier']}",
+        )
+        for idx, kind in enumerate(("music", "video")):
+            self._set_progress(25 + idx * 32, f"Checking {kind.title()}DB")
+            try:
+                db = self._database_describe(info, kind)
+                self._set_status(f"{kind}_db", db["text"])
+                self.log(f"{kind.title()}DB: {db['text']}")
+            except Exception as exc:
+                self._set_status(f"{kind}_db", f"Not available: {exc}")
+                self.log(f"{kind.title()}DB: not available – {exc}")
+        self._set_progress(95, "Database check complete")
+        self._set_status("database", "Check complete")
+
+    def _database_backup(self, kind: str) -> None:
+        label = "MusicDB" if kind == "music" else "VideoDB"
+        self._set_progress(3, "Checking source")
+        info = self._inspect_endpoint("source")
+        self._set_status(
+            "database_source",
+            f"{info['device']} | {info['name']} | {info['identifier']}",
+        )
+        context = self._database_describe(info, kind)
+        self._set_status(f"{kind}_db", context["text"])
+
+        destination = Path(
+            normalize_windows_unc_path(
+                self.database_backup_dir_var.get().strip() or str(default_database_backup_dir())
+            )
+        )
+        try:
+            destination.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            raise TransferError(f"Database backup folder could not be created: {destination}: {exc}") from exc
+
+        self._set_status("database", f"Backing up {label} …")
+        self.log(f"{label} backup: {context['text']}")
+        if context["engine"] == "mariadb":
+            try:
+                result = kodi_db.backup_mariadb(
+                    kind,
+                    context["config"],
+                    destination,
+                    kodi_version=info.get("version", ""),
+                    progress=lambda value, text: self._set_progress(value, text),
+                    log=self.log,
+                )
+            except Exception as exc:
+                raise TransferError(f"{label} backup failed: {exc}") from exc
+        else:
+            stopped = False
+            try:
+                self._set_progress(8, "Stopping Kodi for SQLite snapshot")
+                self._database_stop_kodi(info)
+                stopped = True
+                with tempfile.TemporaryDirectory(prefix=f"jjs-{kind}db-") as td:
+                    local_db = Path(td) / context["filename"]
+                    self._database_download_remote(info, context["remote_path"], local_db)
+                    try:
+                        result = kodi_db.backup_sqlite(
+                            kind,
+                            local_db,
+                            context["filename"],
+                            destination,
+                            kodi_version=info.get("version", ""),
+                            progress=lambda value, text: self._set_progress(35 + value * 0.62, text),
+                            log=self.log,
+                        )
+                    except Exception as exc:
+                        raise TransferError(f"{label} backup failed: {exc}") from exc
+            finally:
+                if stopped:
+                    self._database_start_kodi(info)
+
+        self.database_restore_file_var.set(str(result["path"]))
+        self._set_status(
+            "database",
+            f"Backup complete: {result['engine']} | {result['database']} | schema {result['schema_version']}",
+        )
+        self.log(f"{label} backup written: {result['path']}")
+
+    def _database_restore(self, kind: str) -> None:
+        label = "MusicDB" if kind == "music" else "VideoDB"
+        source = Path(normalize_windows_unc_path(self.database_restore_file_var.get().strip()))
+        if not source.is_file():
+            raise TransferError("Select an existing JJS database backup ZIP first.")
+
+        try:
+            manifest, _schema = kodi_db.validate_backup(source, kind)
+        except Exception as exc:
+            raise TransferError(f"Backup validation failed: {exc}") from exc
+
+        self._set_progress(4, "Checking target database")
+        info = self._inspect_endpoint("source")
+        self._set_status(
+            "database_source",
+            f"{info['device']} | {info['name']} | {info['identifier']}",
+        )
+        context = self._database_describe(info, kind)
+        self._set_status(f"{kind}_db", context["text"])
+        backup_engine = kodi_db.backup_engine(manifest)
+        if backup_engine != context["engine"]:
+            raise TransferError(
+                f"Backup uses {backup_engine.upper()}, but the active {label} uses {context['engine'].upper()}."
+            )
+
+        backup_db = str(manifest.get("source_database") or "?")
+        backup_version = int(manifest.get("schema_version") or -1)
+        if not self._ask_yes_no(
+            f"Restore {label}",
+            f"The active {label} will be completely replaced.\n\n"
+            f"Backup: {backup_db} | {backup_engine.upper()} | schema {backup_version}\n"
+            f"Target: {context['database']} | {context['engine'].upper()}\n\n"
+            "Kodi on this device will be stopped during the restore.\n"
+            "Other Kodi instances must not use the same MariaDB during restore.\n\n"
+            "Continue?",
+        ):
+            raise TransferError("Database restore cancelled.")
+
+        self._set_status("database", f"Restoring {label} …")
+        stopped = False
+        try:
+            self._set_progress(8, "Stopping Kodi")
+            self._database_stop_kodi(info)
+            stopped = True
+
+            if context["engine"] == "mariadb":
+                try:
+                    result = kodi_db.restore_mariadb(
+                        kind,
+                        context["config"],
+                        source,
+                        progress=lambda value, text: self._set_progress(10 + value * 0.85, text),
+                        log=self.log,
+                    )
+                except Exception as exc:
+                    raise TransferError(f"{label} restore failed: {exc}") from exc
+            else:
+                with tempfile.TemporaryDirectory(prefix=f"jjs-{kind}db-restore-") as td:
+                    current_db = Path(td) / ("current-" + context["filename"])
+                    restored_db = Path(td) / ("restored-" + context["filename"])
+                    self._database_download_remote(info, context["remote_path"], current_db)
+                    try:
+                        result = kodi_db.restore_sqlite(
+                            kind,
+                            source,
+                            current_db,
+                            restored_db,
+                            progress=lambda value, text: self._set_progress(35 + value * 0.45, text),
+                            log=self.log,
+                        )
+                    except Exception as exc:
+                        raise TransferError(f"{label} restore failed: {exc}") from exc
+                    self._set_progress(82, "Installing restored SQLite DB")
+                    self._database_upload_sqlite(info, restored_db, context["remote_path"])
+
+            self._set_status(
+                "database",
+                f"Restore complete: {result['engine']} | {context['database']} | schema {result['schema_version']}",
+            )
+            self.log(f"{label} restore completed and verified.")
+        finally:
+            if stopped:
+                self._set_progress(97, "Restarting Kodi")
+                self._database_start_kodi(info)
+
     # ---------- endpoint discovery ----------
     def _profile_display(self, profile: dict) -> str:
         version = profile.get("version", "").strip()
