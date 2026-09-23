@@ -274,6 +274,12 @@ class TransferApp(tk.Tk):
             "screenshot_dir": self.screenshot_dir_var.get().strip(),
             "database_backup_dir": self.database_backup_dir_var.get().strip(),
             "database_restore_file": self.database_restore_file_var.get().strip(),
+            "database_source_mode": self.database_source_mode_var.get().strip(),
+            "database_host": self.database_host_var.get().strip(),
+            "database_port": self.database_port_var.get().strip(),
+            "database_user": self.database_user_var.get().strip(),
+            "database_music_prefix": self.database_music_prefix_var.get().strip(),
+            "database_video_prefix": self.database_video_prefix_var.get().strip(),
             "install_file": self.install_file_var.get().strip(),
             "uninstall_backup": bool(self.uninstall_backup_var.get()),
         }
@@ -316,6 +322,19 @@ class TransferApp(tk.Tk):
         )
         self.database_restore_file_var = tk.StringVar(
             value=str(self._cfg.get("database_restore_file", ""))
+        )
+        self.database_source_mode_var = tk.StringVar(
+            value=str(self._cfg.get("database_source_mode", "Kodi source"))
+        )
+        self.database_host_var = tk.StringVar(value=str(self._cfg.get("database_host", "")))
+        self.database_port_var = tk.StringVar(value=str(self._cfg.get("database_port", "3306")))
+        self.database_user_var = tk.StringVar(value=str(self._cfg.get("database_user", "")))
+        self.database_password_var = tk.StringVar(value="")
+        self.database_music_prefix_var = tk.StringVar(
+            value=str(self._cfg.get("database_music_prefix", "MyMusic"))
+        )
+        self.database_video_prefix_var = tk.StringVar(
+            value=str(self._cfg.get("database_video_prefix", "MyVideos"))
         )
         self.install_file_var = tk.StringVar(value=str(self._cfg.get("install_file", "")))
         self.uninstall_backup_var = tk.BooleanVar(value=bool(self._cfg.get("uninstall_backup", True)))
@@ -675,10 +694,10 @@ class TransferApp(tk.Tk):
     def _build_database_tab(self, outer) -> None:
         ttk.Label(
             outer,
-            text="Back up or restore the active Kodi MusicDB / VideoDB. Uses the same connection and Kodi selection as Source A.",
+            text="Back up or restore MusicDB / VideoDB from Source A or connect directly to a MariaDB server.",
         ).pack(anchor="w", pady=(0, 10))
 
-        connection = ttk.LabelFrame(outer, text="Kodi source", padding=10)
+        connection = ttk.LabelFrame(outer, text="Database source", padding=10)
         connection.pack(fill="x")
         connection.columnconfigure(1, weight=1)
         self._build_database_endpoint(connection)
@@ -756,6 +775,21 @@ class TransferApp(tk.Tk):
         self._log_widgets.append(self.database_log_text)
 
     def _build_database_endpoint(self, frame) -> None:
+        ttk.Label(frame, text="Mode:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
+        mode_box = ttk.Combobox(
+            frame,
+            textvariable=self.database_source_mode_var,
+            values=("Kodi source", "MariaDB server"),
+            state="readonly",
+            width=20,
+        )
+        mode_box.grid(row=0, column=1, sticky="w", pady=3)
+        mode_box.bind("<<ComboboxSelected>>", lambda _e: self._database_mode_changed())
+
+        kodi_frame = ttk.Frame(frame)
+        kodi_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        kodi_frame.columnconfigure(1, weight=1)
+
         source_vars = self._endpoint_vars["source"]
         type_var = source_vars["type"]
         ip_var = source_vars["ip"]
@@ -764,9 +798,9 @@ class TransferApp(tk.Tk):
         password_var = source_vars["password"]
         profile_var = source_vars["profile"]
 
-        ttk.Label(frame, text="Connection:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Label(kodi_frame, text="Connection:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
         type_box = ttk.Combobox(
-            frame,
+            kodi_frame,
             textvariable=type_var,
             values=("Android (ADB)", "LibreELEC (SSH)"),
             state="readonly",
@@ -775,33 +809,84 @@ class TransferApp(tk.Tk):
         type_box.grid(row=0, column=1, sticky="ew", pady=3)
         type_box.bind("<<ComboboxSelected>>", lambda _e: self._endpoint_type_changed("source"))
 
-        ttk.Label(frame, text="IP:").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=3)
-        iprow = ttk.Frame(frame)
+        ttk.Label(kodi_frame, text="IP:").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=3)
+        iprow = ttk.Frame(kodi_frame)
         iprow.grid(row=1, column=1, sticky="ew", pady=3)
         iprow.columnconfigure(0, weight=1)
         ttk.Entry(iprow, textvariable=ip_var).grid(row=0, column=0, sticky="ew")
         ttk.Label(iprow, text="Port:").grid(row=0, column=1, padx=(8, 4))
         ttk.Entry(iprow, textvariable=port_var, width=7).grid(row=0, column=2)
 
-        user_label = ttk.Label(frame, text="SSH-User:")
+        user_label = ttk.Label(kodi_frame, text="SSH-User:")
         user_label.grid(row=2, column=0, sticky="w", padx=(0, 8), pady=3)
-        user_entry = ttk.Entry(frame, textvariable=user_var)
+        user_entry = ttk.Entry(kodi_frame, textvariable=user_var)
         user_entry.grid(row=2, column=1, sticky="ew", pady=3)
 
-        pass_label = ttk.Label(frame, text="SSH password:")
+        pass_label = ttk.Label(kodi_frame, text="SSH password:")
         pass_label.grid(row=3, column=0, sticky="w", padx=(0, 8), pady=3)
-        pass_entry = ttk.Entry(frame, textvariable=password_var, show="●")
+        pass_entry = ttk.Entry(kodi_frame, textvariable=password_var, show="●")
         pass_entry.grid(row=3, column=1, sticky="ew", pady=3)
 
-        ttk.Label(frame, text="Kodi:").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=3)
-        profile_box = ttk.Combobox(frame, textvariable=profile_var)
+        ttk.Label(kodi_frame, text="Kodi:").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=3)
+        profile_box = ttk.Combobox(kodi_frame, textvariable=profile_var)
         profile_box.grid(row=4, column=1, sticky="ew", pady=3)
+
+        server_frame = ttk.Frame(frame)
+        server_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        server_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(server_frame, text="Server:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
+        hostrow = ttk.Frame(server_frame)
+        hostrow.grid(row=0, column=1, sticky="ew", pady=3)
+        hostrow.columnconfigure(0, weight=1)
+        ttk.Entry(hostrow, textvariable=self.database_host_var).grid(row=0, column=0, sticky="ew")
+        ttk.Label(hostrow, text="Port:").grid(row=0, column=1, padx=(8, 4))
+        ttk.Entry(hostrow, textvariable=self.database_port_var, width=7).grid(row=0, column=2)
+
+        ttk.Label(server_frame, text="User:").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(server_frame, textvariable=self.database_user_var).grid(row=1, column=1, sticky="ew", pady=3)
+
+        ttk.Label(server_frame, text="Password:").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(server_frame, textvariable=self.database_password_var, show="●").grid(
+            row=2, column=1, sticky="ew", pady=3
+        )
+
+        ttk.Label(server_frame, text="Music prefix:").grid(row=3, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(server_frame, textvariable=self.database_music_prefix_var).grid(
+            row=3, column=1, sticky="ew", pady=3
+        )
+
+        ttk.Label(server_frame, text="Video prefix:").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(server_frame, textvariable=self.database_video_prefix_var).grid(
+            row=4, column=1, sticky="ew", pady=3
+        )
+
+        ttk.Label(
+            server_frame,
+            text="Server, port, user and prefixes are saved. The MariaDB password is not stored.",
+        ).grid(row=5, column=1, sticky="w", pady=(2, 0))
 
         self._endpoint_widgets["database"] = {
             "profile": profile_box,
             "ssh_rows": (user_label, user_entry, pass_label, pass_entry),
+            "kodi_frame": kodi_frame,
+            "server_frame": server_frame,
         }
         self._refresh_database_connection_rows()
+        self._database_mode_changed()
+
+    def _database_mode_changed(self) -> None:
+        widgets = self._endpoint_widgets.get("database")
+        if not widgets:
+            return
+        direct = self.database_source_mode_var.get().strip() == "MariaDB server"
+        if direct:
+            widgets["kodi_frame"].grid_remove()
+            widgets["server_frame"].grid()
+        else:
+            widgets["server_frame"].grid_remove()
+            widgets["kodi_frame"].grid()
+            self._refresh_database_connection_rows()
 
     def _refresh_database_connection_rows(self) -> None:
         widgets = self._endpoint_widgets.get("database")
@@ -1971,7 +2056,56 @@ class TransferApp(tk.Tk):
         finally:
             client.close()
 
-    def _database_config(self, info: dict, kind: str) -> dict:
+    def _direct_database_config(self, kind: str) -> dict:
+        host = self.database_host_var.get().strip()
+        user = self.database_user_var.get().strip()
+        password = self.database_password_var.get()
+        prefix = (
+            self.database_music_prefix_var.get().strip()
+            if kind == "music"
+            else self.database_video_prefix_var.get().strip()
+        )
+        if not host:
+            raise TransferError("MariaDB server is missing.")
+        if not user:
+            raise TransferError("MariaDB user is missing.")
+        if not prefix:
+            raise TransferError(f"{kind.title()}DB prefix is missing.")
+        try:
+            port = int(self.database_port_var.get().strip() or "3306")
+            if not (1 <= port <= 65535):
+                raise ValueError
+        except ValueError as exc:
+            raise TransferError("MariaDB port is invalid.") from exc
+        return {
+            "engine": "mariadb",
+            "config": {
+                "host": host,
+                "port": port,
+                "user": user,
+                "password": password,
+                "prefix": prefix,
+                "timeout": 5,
+                "ssl_ca": "",
+                "ssl_cert": "",
+                "ssl_key": "",
+            },
+        }
+
+    def _database_source(self) -> tuple[dict | None, str]:
+        if self.database_source_mode_var.get().strip() == "MariaDB server":
+            host = self.database_host_var.get().strip() or "?"
+            port = self.database_port_var.get().strip() or "3306"
+            return None, f"MariaDB server | {host}:{port}"
+        info = self._inspect_endpoint("source")
+        return info, f"{info['device']} | {info['name']} | {info['identifier']}"
+
+    def _database_config(self, info: dict | None, kind: str) -> dict:
+        if self.database_source_mode_var.get().strip() == "MariaDB server":
+            return self._direct_database_config(kind)
+        if info is None:
+            raise TransferError("Kodi source is not available.")
+
         advanced = self._database_remote_path(info, "userdata/advancedsettings.xml")
         raw = self._database_read_remote_bytes(info, advanced)
         if raw:
@@ -1994,7 +2128,7 @@ class TransferApp(tk.Tk):
             "remote_path": self._database_remote_path(info, f"userdata/Database/{filename}"),
         }
 
-    def _database_describe(self, info: dict, kind: str) -> dict:
+    def _database_describe(self, info: dict | None, kind: str) -> dict:
         context = self._database_config(info, kind)
         if context["engine"] == "mariadb":
             try:
@@ -2023,11 +2157,9 @@ class TransferApp(tk.Tk):
 
     def _check_databases(self) -> None:
         self._set_progress(5, "Checking source")
-        info = self._inspect_endpoint("source")
-        self._set_status(
-            "database_source",
-            f"{info['device']} | {info['name']} | {info['identifier']}",
-        )
+        info, source_text = self._database_source()
+        self._set_status("database_source", source_text)
+        self.log(f"Database source: {source_text}")
         for idx, kind in enumerate(("music", "video")):
             self._set_progress(25 + idx * 32, f"Checking {kind.title()}DB")
             try:
@@ -2043,11 +2175,8 @@ class TransferApp(tk.Tk):
     def _database_backup(self, kind: str) -> None:
         label = "MusicDB" if kind == "music" else "VideoDB"
         self._set_progress(3, "Checking source")
-        info = self._inspect_endpoint("source")
-        self._set_status(
-            "database_source",
-            f"{info['device']} | {info['name']} | {info['identifier']}",
-        )
+        info, source_text = self._database_source()
+        self._set_status("database_source", source_text)
         context = self._database_describe(info, kind)
         self._set_status(f"{kind}_db", context["text"])
 
@@ -2069,13 +2198,15 @@ class TransferApp(tk.Tk):
                     kind,
                     context["config"],
                     destination,
-                    kodi_version=info.get("version", ""),
+                    kodi_version=(info or {}).get("version", ""),
                     progress=lambda value, text: self._set_progress(value, text),
                     log=self.log,
                 )
             except Exception as exc:
                 raise TransferError(f"{label} backup failed: {exc}") from exc
         else:
+            if info is None:
+                raise TransferError("SQLite backup requires a Kodi source device.")
             stopped = False
             try:
                 self._set_progress(8, "Stopping Kodi for SQLite snapshot")
@@ -2119,11 +2250,8 @@ class TransferApp(tk.Tk):
             raise TransferError(f"Backup validation failed: {exc}") from exc
 
         self._set_progress(4, "Checking target database")
-        info = self._inspect_endpoint("source")
-        self._set_status(
-            "database_source",
-            f"{info['device']} | {info['name']} | {info['identifier']}",
-        )
+        info, source_text = self._database_source()
+        self._set_status("database_source", source_text)
         context = self._database_describe(info, kind)
         self._set_status(f"{kind}_db", context["text"])
         backup_engine = kodi_db.backup_engine(manifest)
@@ -2134,13 +2262,22 @@ class TransferApp(tk.Tk):
 
         backup_db = str(manifest.get("source_database") or "?")
         backup_version = int(manifest.get("schema_version") or -1)
+        if info is None:
+            runtime_note = (
+                "No Kodi instance is controlled in direct-server mode.\n"
+                "Make sure NO Kodi instance is using this MariaDB during the restore."
+            )
+        else:
+            runtime_note = (
+                "Kodi on this device will be stopped during the restore.\n"
+                "Other Kodi instances must not use the same MariaDB during restore."
+            )
         if not self._ask_yes_no(
             f"Restore {label}",
             f"The active {label} will be completely replaced.\n\n"
             f"Backup: {backup_db} | {backup_engine.upper()} | schema {backup_version}\n"
             f"Target: {context['database']} | {context['engine'].upper()}\n\n"
-            "Kodi on this device will be stopped during the restore.\n"
-            "Other Kodi instances must not use the same MariaDB during restore.\n\n"
+            f"{runtime_note}\n\n"
             "Continue?",
         ):
             raise TransferError("Database restore cancelled.")
@@ -2148,9 +2285,10 @@ class TransferApp(tk.Tk):
         self._set_status("database", f"Restoring {label} …")
         stopped = False
         try:
-            self._set_progress(8, "Stopping Kodi")
-            self._database_stop_kodi(info)
-            stopped = True
+            if info is not None:
+                self._set_progress(8, "Stopping Kodi")
+                self._database_stop_kodi(info)
+                stopped = True
 
             if context["engine"] == "mariadb":
                 try:
@@ -2158,12 +2296,17 @@ class TransferApp(tk.Tk):
                         kind,
                         context["config"],
                         source,
-                        progress=lambda value, text: self._set_progress(10 + value * 0.85, text),
+                        progress=lambda value, text: self._set_progress(
+                            (10 + value * 0.85) if info is not None else value,
+                            text,
+                        ),
                         log=self.log,
                     )
                 except Exception as exc:
                     raise TransferError(f"{label} restore failed: {exc}") from exc
             else:
+                if info is None:
+                    raise TransferError("SQLite restore requires a Kodi source device.")
                 with tempfile.TemporaryDirectory(prefix=f"jjs-{kind}db-restore-") as td:
                     current_db = Path(td) / ("current-" + context["filename"])
                     restored_db = Path(td) / ("restored-" + context["filename"])
@@ -2188,7 +2331,7 @@ class TransferApp(tk.Tk):
             )
             self.log(f"{label} restore completed and verified.")
         finally:
-            if stopped:
+            if stopped and info is not None:
                 self._set_progress(97, "Restarting Kodi")
                 self._database_start_kodi(info)
 
