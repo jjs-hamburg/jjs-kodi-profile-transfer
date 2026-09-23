@@ -50,7 +50,7 @@ jobs:
           python -c "import installer.jjs_kodi_profile_transfer as m; assert m.normalize_windows_unc_path('//MEDIA-NAS/mce/test.tar') == r'\\MEDIA-NAS\mce\test.tar'; assert m.replace_unc_server('//MEDIA-NAS/mce/test.tar', '192.0.2.10') == r'\\192.0.2.10\mce\test.tar'; print('UNC normalization/fallback OK')"
           python -c "from pathlib import Path; s=Path('installer/jjs_kodi_profile_transfer.py').read_text(encoding='utf-8'); assert 'same platform - full restore' in s; assert 'Preserved target Addons*.db' in s; assert 'binary addon settings' in s; print('Cross-platform addon policy OK')"
           python -c "from pathlib import Path; s=Path('installer/jjs_kodi_profile_transfer.py').read_text(encoding='utf-8'); assert 'def _install_android_apk' in s; assert 'def _uninstall_android_kodi' in s; assert '/storage/.update/' in s; assert 'The existing app was NOT uninstalled.' in s; print('Install/update safety paths OK')"
-          python -c "from pathlib import Path; s=Path('installer/jjs_kodi_profile_transfer.py').read_text(encoding='utf-8'); assert 'notebook.add(screenshot_tab, text=\"Screenshots\")' in s; assert '\"exec-out\", \"screencap\", \"-p\"' in s; assert 'TakeScreenshot({remote},sync)' in s; assert 'Temporary LibreELEC screenshot removed.' in s; print('Screenshot paths OK')"
+          python -c "from pathlib import Path; s=Path('installer/jjs_kodi_profile_transfer.py').read_text(encoding='utf-8'); assert 'def _build_screenshot_tab' in s; assert 'def _take_android_screenshot' in s; assert 'screencap' in s; assert 'TakeScreenshot({remote},sync)' in s; assert 'Temporary LibreELEC screenshot removed.' in s; print('Screenshot paths OK')"
 
       - name: Build single EXE
         shell: pwsh
