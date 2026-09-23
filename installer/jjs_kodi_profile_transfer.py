@@ -4,7 +4,8 @@
 
 The tool backs up, restores, and transfers complete Kodi profiles between Android
 (ADB) and LibreELEC (SSH). It can also install or update a local Kodi APK on Android,
-uninstall a selected Android Kodi package, and stage a local LibreELEC update TAR.
+uninstall a selected Android Kodi package, stage a local LibreELEC update TAR, and
+capture Kodi screenshots to a local Windows folder.
 
 Backup files are uncompressed TAR archives. New backups contain transfer metadata.
 On cross-platform or cross-architecture restore, platform-specific binary add-ons
@@ -44,9 +45,14 @@ try:
 except ImportError:
     paramiko = None
 
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
+
 
 APP_TITLE = "JJS KODI Profile Backup/Restore, Transfer & Install"
-APP_VERSION = "1.12"
+APP_VERSION = "1.13"
 META_NAME = "JJS_PROFILE_TRANSFER.json"
 
 DEFAULT_ADB_PORT = 5555
@@ -86,6 +92,11 @@ def known_hosts_path() -> Path:
 def default_backup_dir() -> Path:
     docs = Path.home() / "Documents"
     return docs / "Kodi-Profile-Backups"
+
+
+def default_screenshot_dir() -> Path:
+    pictures = Path.home() / "Pictures"
+    return pictures / "Kodi-Screenshots"
 
 
 def normalize_windows_unc_path(value: str) -> str:
@@ -241,6 +252,7 @@ class TransferApp(tk.Tk):
             "backup_dir": self.backup_dir_var.get().strip(),
             "backup_file": self.backup_file_var.get().strip(),
             "safety_backup": bool(self.safety_backup_var.get()),
+            "screenshot_dir": self.screenshot_dir_var.get().strip(),
             "install_file": self.install_file_var.get().strip(),
             "uninstall_backup": bool(self.uninstall_backup_var.get()),
         }
@@ -275,6 +287,9 @@ class TransferApp(tk.Tk):
         self.backup_dir_var = tk.StringVar(value=str(self._cfg.get("backup_dir", default_backup_dir())))
         self.backup_file_var = tk.StringVar(value=str(self._cfg.get("backup_file", "")))
         self.safety_backup_var = tk.BooleanVar(value=bool(self._cfg.get("safety_backup", True)))
+        self.screenshot_dir_var = tk.StringVar(
+            value=str(self._cfg.get("screenshot_dir", default_screenshot_dir()))
+        )
         self.install_file_var = tk.StringVar(value=str(self._cfg.get("install_file", "")))
         self.uninstall_backup_var = tk.BooleanVar(value=bool(self._cfg.get("uninstall_backup", True)))
 
@@ -301,11 +316,14 @@ class TransferApp(tk.Tk):
 
         profile_tab = ttk.Frame(notebook, padding=10)
         install_tab = ttk.Frame(notebook, padding=10)
+        screenshot_tab = ttk.Frame(notebook, padding=10)
         notebook.add(profile_tab, text="Profile Backup / Restore / Transfer")
         notebook.add(install_tab, text="Kodi Install / Update")
+        notebook.add(screenshot_tab, text="Screenshots")
 
         self._build_profile_tab(profile_tab)
         self._build_install_tab(install_tab)
+        self._build_screenshot_tab(screenshot_tab)
 
     def _build_profile_tab(self, outer) -> None:
         endpoints = ttk.Frame(outer)
@@ -457,6 +475,141 @@ class TransferApp(tk.Tk):
         self._log_widgets.append(self.install_log_text)
 
         self._install_type_changed(initial=True)
+
+    def _build_screenshot_tab(self, outer) -> None:
+        ttk.Label(
+            outer,
+            text="Uses the same connection data as Source A. Changes in either tab are synchronized immediately.",
+        ).pack(anchor="w", pady=(0, 10))
+
+        connection = ttk.LabelFrame(outer, text="Kodi source", padding=10)
+        connection.pack(fill="x")
+        connection.columnconfigure(1, weight=1)
+        self._build_screenshot_endpoint(connection)
+
+        destination = ttk.LabelFrame(outer, text="Screenshot destination", padding=10)
+        destination.pack(fill="x", pady=(10, 0))
+        destination.columnconfigure(1, weight=1)
+        self._path_row(
+            destination,
+            0,
+            "Folder:",
+            self.screenshot_dir_var,
+            self._browse_screenshot_dir,
+        )
+        ttk.Label(
+            destination,
+            text="Thin solid-black outer borders are removed automatically when possible.",
+        ).grid(row=1, column=1, sticky="w", pady=(2, 0))
+
+        actions = ttk.Frame(outer)
+        actions.pack(fill="x", pady=10)
+
+        self.screenshot_button = ttk.Button(
+            actions,
+            text="Take Screenshot",
+            command=lambda: self._start_worker(self._take_screenshot, "screenshot"),
+        )
+        self.screenshot_button.pack(side="left", padx=(0, 8))
+        self._action_buttons.append(self.screenshot_button)
+
+        self.screenshot_progress = ttk.Progressbar(actions, mode="indeterminate", length=220)
+        self.screenshot_progress.pack(side="right")
+        self._progress_bars.append(self.screenshot_progress)
+
+        status = ttk.LabelFrame(outer, text="Status", padding=8)
+        status.pack(fill="x", pady=(0, 10))
+        status.columnconfigure(1, weight=1)
+        ttk.Label(status, text="Screenshot:").grid(
+            row=0, column=0, sticky="nw", padx=(0, 10), pady=2
+        )
+        var = tk.StringVar(value="—")
+        self.status_vars["screenshot"] = var
+        ttk.Label(status, textvariable=var).grid(row=0, column=1, sticky="w", pady=2)
+
+        log_box = ttk.LabelFrame(outer, text="Log", padding=6)
+        log_box.pack(fill="both", expand=True)
+        self.screenshot_log_text = tk.Text(
+            log_box,
+            wrap="word",
+            height=14,
+            font=("Consolas", 9),
+            state="disabled",
+        )
+        scroll = ttk.Scrollbar(log_box, orient="vertical", command=self.screenshot_log_text.yview)
+        self.screenshot_log_text.configure(yscrollcommand=scroll.set)
+        self.screenshot_log_text.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        self._log_widgets.append(self.screenshot_log_text)
+
+    def _build_screenshot_endpoint(self, frame) -> None:
+        source_vars = self._endpoint_vars["source"]
+        type_var = source_vars["type"]
+        ip_var = source_vars["ip"]
+        port_var = source_vars["port"]
+        user_var = source_vars["user"]
+        password_var = source_vars["password"]
+
+        ttk.Label(frame, text="Connection:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
+        type_box = ttk.Combobox(
+            frame,
+            textvariable=type_var,
+            values=("Android (ADB)", "LibreELEC (SSH)"),
+            state="readonly",
+            width=18,
+        )
+        type_box.grid(row=0, column=1, sticky="ew", pady=3)
+        type_box.bind("<<ComboboxSelected>>", lambda _e: self._endpoint_type_changed("source"))
+
+        ttk.Label(frame, text="IP:").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=3)
+        iprow = ttk.Frame(frame)
+        iprow.grid(row=1, column=1, sticky="ew", pady=3)
+        iprow.columnconfigure(0, weight=1)
+        ttk.Entry(iprow, textvariable=ip_var).grid(row=0, column=0, sticky="ew")
+        ttk.Label(iprow, text="Port:").grid(row=0, column=1, padx=(8, 4))
+        ttk.Entry(iprow, textvariable=port_var, width=7).grid(row=0, column=2)
+
+        user_label = ttk.Label(frame, text="SSH-User:")
+        user_label.grid(row=2, column=0, sticky="w", padx=(0, 8), pady=3)
+        user_entry = ttk.Entry(frame, textvariable=user_var)
+        user_entry.grid(row=2, column=1, sticky="ew", pady=3)
+
+        pass_label = ttk.Label(frame, text="SSH password:")
+        pass_label.grid(row=3, column=0, sticky="w", padx=(0, 8), pady=3)
+        pass_entry = ttk.Entry(frame, textvariable=password_var, show="●")
+        pass_entry.grid(row=3, column=1, sticky="ew", pady=3)
+
+        adb_label = ttk.Label(frame, text="ADB folder:")
+        adb_label.grid(row=4, column=0, sticky="w", padx=(0, 8), pady=3)
+        adb_holder = ttk.Frame(frame)
+        adb_holder.grid(row=4, column=1, sticky="ew", pady=3)
+        adb_holder.columnconfigure(0, weight=1)
+        ttk.Entry(adb_holder, textvariable=self.adb_dir_var).grid(row=0, column=0, sticky="ew")
+        ttk.Button(adb_holder, text="Browse…", command=self._browse_adb_dir, takefocus=False).grid(
+            row=0, column=1, padx=(6, 0)
+        )
+
+        self._endpoint_widgets["screenshot"] = {
+            "ssh_rows": (user_label, user_entry, pass_label, pass_entry),
+            "adb_rows": (adb_label, adb_holder),
+        }
+        self._refresh_screenshot_connection_rows()
+
+    def _refresh_screenshot_connection_rows(self) -> None:
+        widgets = self._endpoint_widgets.get("screenshot")
+        if not widgets:
+            return
+        is_android = str(self._endpoint_vars["source"]["type"].get()).startswith("Android")
+        for widget in widgets["ssh_rows"]:
+            if is_android:
+                widget.grid_remove()
+            else:
+                widget.grid()
+        for widget in widgets["adb_rows"]:
+            if is_android:
+                widget.grid()
+            else:
+                widget.grid_remove()
 
     def _build_install_endpoint(self, frame) -> None:
         # Target B and the Install / Update tab are two views of the same target device.
@@ -699,6 +852,8 @@ class TransferApp(tk.Tk):
 
         if role == "target" and "install" in self._endpoint_widgets:
             self._install_type_changed(initial=initial)
+        if role == "source":
+            self._refresh_screenshot_connection_rows()
 
     def _path_row(self, parent, row: int, label: str, variable: tk.StringVar, command) -> None:
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=3)
@@ -730,6 +885,12 @@ class TransferApp(tk.Tk):
         )
         if p:
             self.backup_file_var.set(p)
+
+    def _browse_screenshot_dir(self) -> None:
+        initial = self.screenshot_dir_var.get() or str(default_screenshot_dir())
+        p = filedialog.askdirectory(initialdir=initial)
+        if p:
+            self.screenshot_dir_var.set(p)
 
     def _browse_install_file(self) -> None:
         is_android = str(self._endpoint_vars["install"]["type"].get()).startswith("Android")
@@ -896,6 +1057,28 @@ class TransferApp(tk.Tk):
                 self.log("  " + line)
         if check and cp.returncode != 0:
             raise TransferError(f"Command failed (code {cp.returncode}): {subprocess.list2cmdline(args)}")
+        return cp
+
+    def _run_binary(
+        self,
+        args: list[str],
+        timeout: int | None = 60,
+    ) -> subprocess.CompletedProcess[bytes]:
+        self.log("$ " + subprocess.list2cmdline(args))
+        try:
+            cp = subprocess.run(
+                args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=timeout,
+                creationflags=CREATE_NO_WINDOW,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise TransferError(f"Timeout while running: {subprocess.list2cmdline(args)}") from e
+        err = (cp.stderr or b"").decode("utf-8", errors="replace").strip()
+        for line in err.splitlines():
+            if line:
+                self.log("  ! " + line)
         return cp
 
     def _find_or_install_adb(self) -> Path:
@@ -1099,6 +1282,169 @@ class TransferApp(tk.Tk):
             if line:
                 self.log("  ! " + line)
         return code, out, err
+
+    # ---------- screenshots ----------
+    def _screenshot_destination(self) -> Path:
+        root_text = normalize_windows_unc_path(
+            self.screenshot_dir_var.get().strip() or str(default_screenshot_dir())
+        )
+        root = Path(root_text)
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            raise TransferError(f"Screenshot destination folder could not be created: {root}: {e}") from e
+
+        stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+        candidate = root / f"kodi-screenshot-{stamp}.png"
+        n = 2
+        while candidate.exists():
+            candidate = root / f"kodi-screenshot-{stamp}-{n}.png"
+            n += 1
+        return candidate
+
+    def _trim_black_screenshot_borders(self, path: Path) -> tuple[int, int, int, int] | None:
+        if Image is None:
+            self.log("Pillow is unavailable; automatic black-border trimming was skipped.")
+            return None
+        try:
+            with Image.open(path) as source:
+                image = source.convert("RGB")
+                width, height = image.size
+                bbox = image.getbbox()
+                if bbox is None:
+                    self.log("WARNING: the captured screenshot is completely black.")
+                    return None
+
+                left, top, right, bottom = bbox
+                right_margin = width - right
+                bottom_margin = height - bottom
+                max_x = max(1, int(width * 0.08))
+                max_y = max(1, int(height * 0.08))
+
+                crop_left = left if 0 < left <= max_x else 0
+                crop_top = top if 0 < top <= max_y else 0
+                crop_right = right_margin if 0 < right_margin <= max_x else 0
+                crop_bottom = bottom_margin if 0 < bottom_margin <= max_y else 0
+
+                if not any((crop_left, crop_top, crop_right, crop_bottom)):
+                    return None
+
+                box = (
+                    crop_left,
+                    crop_top,
+                    width - crop_right,
+                    height - crop_bottom,
+                )
+                cropped = image.crop(box)
+                cropped.save(path, format="PNG")
+                return crop_left, crop_top, crop_right, crop_bottom
+        except Exception as e:
+            self.log(f"WARNING: automatic black-border trimming failed: {e}")
+            return None
+
+    def _take_android_screenshot(self) -> bytes:
+        serial, device = self._connect_android("source")
+        adb = self._find_or_install_adb()
+        cp = self._run_binary(
+            [str(adb), "-s", serial, "exec-out", "screencap", "-p"],
+            timeout=30,
+        )
+        if cp.returncode != 0:
+            raise TransferError(f"Android screenshot capture failed (ADB exit code {cp.returncode}).")
+        data = cp.stdout or b""
+        if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise TransferError("Android screenshot capture did not return a valid PNG image.")
+        label = " ".join(x for x in (device.get("manufacturer", ""), device.get("model", "")) if x).strip()
+        self.log(f"Android screenshot captured from {label or serial}.")
+        return data
+
+    def _take_libreelec_screenshot(self) -> bytes:
+        client = self._ssh_client("source")
+        remote = f"/tmp/jjs-kodi-screenshot-{os.getpid()}-{int(time.time() * 1000)}.png"
+        sftp = None
+        try:
+            code, _, _ = self._ssh_exec(
+                client,
+                "command -v kodi-send >/dev/null 2>&1",
+                timeout=20,
+            )
+            if code != 0:
+                raise TransferError("LibreELEC does not provide the kodi-send command.")
+
+            action = f"TakeScreenshot({remote},sync)"
+            code, _, err = self._ssh_exec(
+                client,
+                f"kodi-send --host=127.0.0.1 --action={shlex.quote(action)}",
+                timeout=30,
+            )
+            if code != 0:
+                raise TransferError(
+                    f"Kodi screenshot command failed.{(' ' + err) if err else ''}"
+                )
+
+            sftp = client.open_sftp()
+            deadline = time.monotonic() + 10
+            size = 0
+            while time.monotonic() < deadline:
+                try:
+                    size = int(sftp.stat(remote).st_size)
+                    if size > 8:
+                        break
+                except OSError:
+                    pass
+                time.sleep(0.2)
+            if size <= 8:
+                raise TransferError(
+                    "Kodi did not create a screenshot on LibreELEC. "
+                    "The active Kodi display backend may not support screenshots."
+                )
+
+            with sftp.open(remote, "rb") as handle:
+                data = handle.read()
+            if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+                raise TransferError("LibreELEC screenshot capture did not return a valid PNG image.")
+            self.log(f"LibreELEC screenshot captured via temporary file {remote}.")
+            return data
+        finally:
+            if sftp is not None:
+                try:
+                    sftp.remove(remote)
+                    self.log("Temporary LibreELEC screenshot removed.")
+                except OSError:
+                    self.log(f"WARNING: temporary screenshot could not be removed: {remote}")
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
+            else:
+                try:
+                    self._ssh_exec(client, f"rm -f {shlex.quote(remote)}", timeout=10)
+                except Exception:
+                    pass
+            client.close()
+
+    def _take_screenshot(self) -> None:
+        self._set_status("screenshot", "Connecting …")
+        is_android = str(self._endpoint_vars["source"]["type"].get()).startswith("Android")
+        data = self._take_android_screenshot() if is_android else self._take_libreelec_screenshot()
+
+        destination = self._screenshot_destination()
+        try:
+            destination.write_bytes(data)
+        except Exception as e:
+            raise TransferError(f"Screenshot could not be saved: {destination}: {e}") from e
+
+        margins = self._trim_black_screenshot_borders(destination)
+        if margins:
+            left, top, right, bottom = margins
+            self.log(
+                "Removed solid-black screenshot border "
+                f"(left {left}px, top {top}px, right {right}px, bottom {bottom}px)."
+            )
+
+        size_kib = destination.stat().st_size / 1024
+        self.log(f"Screenshot saved locally: {destination} ({size_kib:.0f} KiB)")
+        self._set_status("screenshot", f"Saved: {destination}")
 
     # ---------- endpoint discovery ----------
     def _profile_display(self, profile: dict) -> str:
