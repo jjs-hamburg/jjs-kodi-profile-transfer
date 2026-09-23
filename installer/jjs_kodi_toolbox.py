@@ -50,9 +50,14 @@ try:
 except ImportError:
     Image = None
 
+try:
+    from . import jjs_kodi_database as kodi_db
+except ImportError:
+    import jjs_kodi_database as kodi_db
+
 
 APP_TITLE = "JJS KODI Toolbox"
-APP_VERSION = "1.13"
+APP_VERSION = "1.14"
 META_NAME = "JJS_PROFILE_TRANSFER.json"
 
 DEFAULT_ADB_PORT = 5555
@@ -97,6 +102,11 @@ def default_backup_dir() -> Path:
 def default_screenshot_dir() -> Path:
     pictures = Path.home() / "Pictures"
     return pictures / "Kodi-Screenshots"
+
+
+def default_database_backup_dir() -> Path:
+    docs = Path.home() / "Documents"
+    return docs / "Kodi-Database-Backups"
 
 
 def normalize_windows_unc_path(value: str) -> str:
@@ -262,6 +272,8 @@ class TransferApp(tk.Tk):
             "backup_file": self.backup_file_var.get().strip(),
             "safety_backup": bool(self.safety_backup_var.get()),
             "screenshot_dir": self.screenshot_dir_var.get().strip(),
+            "database_backup_dir": self.database_backup_dir_var.get().strip(),
+            "database_restore_file": self.database_restore_file_var.get().strip(),
             "install_file": self.install_file_var.get().strip(),
             "uninstall_backup": bool(self.uninstall_backup_var.get()),
         }
@@ -289,7 +301,7 @@ class TransferApp(tk.Tk):
         ttk.Label(outer, text=APP_TITLE, font=("Segoe UI", 16, "bold")).pack(anchor="w")
         ttk.Label(
             outer,
-            text="Manage Kodi profiles, install or update Kodi, and capture screenshots on Android/ADB and LibreELEC/SSH.",
+            text="Manage Kodi profiles, databases, installs/updates, and screenshots on Android/ADB and LibreELEC/SSH.",
         ).pack(anchor="w", pady=(2, 10))
 
         self.adb_dir_var = tk.StringVar(value=str(self._cfg.get("adb_dir", DEFAULT_ADB_DIR)))
@@ -298,6 +310,12 @@ class TransferApp(tk.Tk):
         self.safety_backup_var = tk.BooleanVar(value=bool(self._cfg.get("safety_backup", True)))
         self.screenshot_dir_var = tk.StringVar(
             value=str(self._cfg.get("screenshot_dir", default_screenshot_dir()))
+        )
+        self.database_backup_dir_var = tk.StringVar(
+            value=str(self._cfg.get("database_backup_dir", default_database_backup_dir()))
+        )
+        self.database_restore_file_var = tk.StringVar(
+            value=str(self._cfg.get("database_restore_file", ""))
         )
         self.install_file_var = tk.StringVar(value=str(self._cfg.get("install_file", "")))
         self.uninstall_backup_var = tk.BooleanVar(value=bool(self._cfg.get("uninstall_backup", True)))
@@ -326,13 +344,16 @@ class TransferApp(tk.Tk):
         profile_tab = ttk.Frame(notebook, padding=10)
         install_tab = ttk.Frame(notebook, padding=10)
         screenshot_tab = ttk.Frame(notebook, padding=10)
+        database_tab = ttk.Frame(notebook, padding=10)
         notebook.add(profile_tab, text="Profile Backup / Restore / Transfer")
         notebook.add(install_tab, text="Kodi Install / Update")
         notebook.add(screenshot_tab, text="Screenshots")
+        notebook.add(database_tab, text="Databases")
 
         self._build_profile_tab(profile_tab)
         self._build_install_tab(install_tab)
         self._build_screenshot_tab(screenshot_tab)
+        self._build_database_tab(database_tab)
 
     def _build_profile_tab(self, outer) -> None:
         endpoints = ttk.Frame(outer)
@@ -651,6 +672,148 @@ class TransferApp(tk.Tk):
             else:
                 widget.grid()
 
+    def _build_database_tab(self, outer) -> None:
+        ttk.Label(
+            outer,
+            text="Back up or restore the active Kodi MusicDB / VideoDB. Uses the same connection and Kodi selection as Source A.",
+        ).pack(anchor="w", pady=(0, 10))
+
+        connection = ttk.LabelFrame(outer, text="Kodi source", padding=10)
+        connection.pack(fill="x")
+        connection.columnconfigure(1, weight=1)
+        self._build_database_endpoint(connection)
+
+        files = ttk.LabelFrame(outer, text="Database backup files", padding=10)
+        files.pack(fill="x", pady=(10, 0))
+        files.columnconfigure(1, weight=1)
+        self._path_row(
+            files, 0, "Backup destination:", self.database_backup_dir_var, self._browse_database_backup_dir
+        )
+        self._path_row(
+            files, 1, "Backup to restore:", self.database_restore_file_var, self._browse_database_restore_file
+        )
+        ttk.Label(
+            files,
+            text="Uses the JJS Music Library Manager backup format (ZIP format version 2).",
+        ).grid(row=2, column=1, sticky="w", pady=(2, 0))
+
+        actions = ttk.Frame(outer)
+        actions.pack(fill="x", pady=10)
+        for text, fn in (
+            ("Check DBs", self._check_databases),
+            ("BACKUP MusicDB", lambda: self._database_backup("music")),
+            ("RESTORE MusicDB", lambda: self._database_restore("music")),
+            ("BACKUP VideoDB", lambda: self._database_backup("video")),
+            ("RESTORE VideoDB", lambda: self._database_restore("video")),
+        ):
+            button = ttk.Button(
+                actions,
+                text=text,
+                command=lambda f=fn: self._start_worker(f, "database"),
+            )
+            button.pack(side="left", padx=(0, 8))
+            self._action_buttons.append(button)
+
+        self.database_progress = ttk.Progressbar(
+            actions, mode="determinate", maximum=100, length=200
+        )
+        self.database_progress.pack(side="right")
+        self.database_progress_var = tk.StringVar(value="Ready")
+        ttk.Label(actions, textvariable=self.database_progress_var, width=23, anchor="e").pack(
+            side="right", padx=(0, 8)
+        )
+        self._progress_bars["database"] = self.database_progress
+        self._progress_vars["database"] = self.database_progress_var
+        self._progress_values["database"] = 0.0
+
+        status = ttk.LabelFrame(outer, text="Status", padding=8)
+        status.pack(fill="x", pady=(0, 10))
+        status.columnconfigure(1, weight=1)
+        for row, (key, label) in enumerate(
+            (
+                ("database_source", "Source"),
+                ("music_db", "MusicDB"),
+                ("video_db", "VideoDB"),
+                ("database", "Operation"),
+            )
+        ):
+            ttk.Label(status, text=label + ":").grid(
+                row=row, column=0, sticky="nw", padx=(0, 10), pady=2
+            )
+            var = tk.StringVar(value="—")
+            self.status_vars[key] = var
+            ttk.Label(status, textvariable=var).grid(row=row, column=1, sticky="w", pady=2)
+
+        log_box = ttk.LabelFrame(outer, text="Log", padding=6)
+        log_box.pack(fill="both", expand=True)
+        self.database_log_text = tk.Text(
+            log_box, wrap="word", height=14, font=("Consolas", 9), state="disabled"
+        )
+        scroll = ttk.Scrollbar(log_box, orient="vertical", command=self.database_log_text.yview)
+        self.database_log_text.configure(yscrollcommand=scroll.set)
+        self.database_log_text.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        self._log_widgets.append(self.database_log_text)
+
+    def _build_database_endpoint(self, frame) -> None:
+        source_vars = self._endpoint_vars["source"]
+        type_var = source_vars["type"]
+        ip_var = source_vars["ip"]
+        port_var = source_vars["port"]
+        user_var = source_vars["user"]
+        password_var = source_vars["password"]
+        profile_var = source_vars["profile"]
+
+        ttk.Label(frame, text="Connection:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
+        type_box = ttk.Combobox(
+            frame,
+            textvariable=type_var,
+            values=("Android (ADB)", "LibreELEC (SSH)"),
+            state="readonly",
+            width=18,
+        )
+        type_box.grid(row=0, column=1, sticky="ew", pady=3)
+        type_box.bind("<<ComboboxSelected>>", lambda _e: self._endpoint_type_changed("source"))
+
+        ttk.Label(frame, text="IP:").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=3)
+        iprow = ttk.Frame(frame)
+        iprow.grid(row=1, column=1, sticky="ew", pady=3)
+        iprow.columnconfigure(0, weight=1)
+        ttk.Entry(iprow, textvariable=ip_var).grid(row=0, column=0, sticky="ew")
+        ttk.Label(iprow, text="Port:").grid(row=0, column=1, padx=(8, 4))
+        ttk.Entry(iprow, textvariable=port_var, width=7).grid(row=0, column=2)
+
+        user_label = ttk.Label(frame, text="SSH-User:")
+        user_label.grid(row=2, column=0, sticky="w", padx=(0, 8), pady=3)
+        user_entry = ttk.Entry(frame, textvariable=user_var)
+        user_entry.grid(row=2, column=1, sticky="ew", pady=3)
+
+        pass_label = ttk.Label(frame, text="SSH password:")
+        pass_label.grid(row=3, column=0, sticky="w", padx=(0, 8), pady=3)
+        pass_entry = ttk.Entry(frame, textvariable=password_var, show="●")
+        pass_entry.grid(row=3, column=1, sticky="ew", pady=3)
+
+        ttk.Label(frame, text="Kodi:").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=3)
+        profile_box = ttk.Combobox(frame, textvariable=profile_var)
+        profile_box.grid(row=4, column=1, sticky="ew", pady=3)
+
+        self._endpoint_widgets["database"] = {
+            "profile": profile_box,
+            "ssh_rows": (user_label, user_entry, pass_label, pass_entry),
+        }
+        self._refresh_database_connection_rows()
+
+    def _refresh_database_connection_rows(self) -> None:
+        widgets = self._endpoint_widgets.get("database")
+        if not widgets:
+            return
+        is_android = str(self._endpoint_vars["source"]["type"].get()).startswith("Android")
+        for widget in widgets["ssh_rows"]:
+            if is_android:
+                widget.grid_remove()
+            else:
+                widget.grid()
+
     def _build_install_endpoint(self, frame) -> None:
         # Target B and the Install / Update tab are two views of the same target device.
         # Reuse the exact same Tk variables so edits in either tab are visible immediately
@@ -879,6 +1042,8 @@ class TransferApp(tk.Tk):
             self._endpoint_widgets[role]["profile"].configure(values=())
             if role == "source" and "screenshot" in self._endpoint_widgets:
                 self._endpoint_widgets["screenshot"]["profile"].configure(values=())
+            if role == "source" and "database" in self._endpoint_widgets:
+                self._endpoint_widgets["database"]["profile"].configure(values=())
             if role == "target" and "install" in self._endpoint_widgets:
                 self._endpoint_widgets["install"]["profile"].configure(values=())
 
@@ -896,6 +1061,7 @@ class TransferApp(tk.Tk):
             self._install_type_changed(initial=initial)
         if role == "source":
             self._refresh_screenshot_connection_rows()
+            self._refresh_database_connection_rows()
 
     def _path_row(self, parent, row: int, label: str, variable: tk.StringVar, command) -> None:
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=3)
@@ -933,6 +1099,22 @@ class TransferApp(tk.Tk):
         p = filedialog.askdirectory(initialdir=initial)
         if p:
             self.screenshot_dir_var.set(p)
+
+    def _browse_database_backup_dir(self) -> None:
+        initial = self.database_backup_dir_var.get() or str(default_database_backup_dir())
+        p = filedialog.askdirectory(initialdir=initial)
+        if p:
+            self.database_backup_dir_var.set(p)
+
+    def _browse_database_restore_file(self) -> None:
+        initial = self.database_backup_dir_var.get() or str(default_database_backup_dir())
+        p = filedialog.askopenfilename(
+            title="Select JJS database backup",
+            initialdir=initial,
+            filetypes=[("JJS database backup", "*.zip"), ("All files", "*.*")],
+        )
+        if p:
+            self.database_restore_file_var.set(p)
 
     def _browse_install_file(self) -> None:
         is_android = str(self._endpoint_vars["install"]["type"].get()).startswith("Android")
@@ -993,6 +1175,8 @@ class TransferApp(tk.Tk):
                         self._endpoint_widgets[role]["profile"].configure(values=values)
                         if role == "source" and "screenshot" in self._endpoint_widgets:
                             self._endpoint_widgets["screenshot"]["profile"].configure(values=values)
+                        if role == "source" and "database" in self._endpoint_widgets:
+                            self._endpoint_widgets["database"]["profile"].configure(values=values)
                         self._endpoint_vars[role]["profile"].set(selected_text)
                     finally:
                         done.set()
@@ -1062,6 +1246,7 @@ class TransferApp(tk.Tk):
         progress_key = {
             "install": "install",
             "screenshot": "screenshot",
+            "database": "database",
         }.get(error_status_key, "profile")
         self._active_progress_key = progress_key
         self._set_progress(0, "Starting", progress_key)
@@ -1631,6 +1816,8 @@ class TransferApp(tk.Tk):
             self._endpoint_widgets[role]["profile"].configure(values=values)
             if role == "source" and "screenshot" in self._endpoint_widgets:
                 self._endpoint_widgets["screenshot"]["profile"].configure(values=values)
+            if role == "source" and "database" in self._endpoint_widgets:
+                self._endpoint_widgets["database"]["profile"].configure(values=values)
             self._endpoint_vars[role]["profile"].set(selected_text)
         else:
             done = threading.Event()
