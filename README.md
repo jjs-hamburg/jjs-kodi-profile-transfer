@@ -154,13 +154,19 @@ Release files:
 - `JJS-KODI-Toolbox.exe`
 - `SHA256SUMS.txt`
 
-The executable filename is retained for continuity with earlier releases.
-
 The source used for the build is:
 
 `installer/jjs_kodi_toolbox.py`
 
 The repository source is the authoritative project state.
+
+## Local application data
+
+JJS KODI Toolbox stores its local configuration, SSH host keys, and logs below:
+
+`%LOCALAPPDATA%\\JJSKodiToolbox\\`
+
+This is intentionally a new application-data location. Existing data from earlier JJS KODI Profile Transfer builds is not migrated or reused. SSH passwords are never stored.
 
 ## Important warning
 
