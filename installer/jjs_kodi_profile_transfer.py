@@ -1510,16 +1510,20 @@ class TransferApp(tk.Tk):
             client.close()
 
     def _take_screenshot(self) -> None:
+        self._set_progress(10, "Connecting")
         self._set_status("screenshot", "Connecting …")
         is_android = str(self._endpoint_vars["source"]["type"].get()).startswith("Android")
+        self._set_progress(25, "Capturing screen")
         data = self._take_android_screenshot() if is_android else self._take_libreelec_screenshot()
 
+        self._set_progress(75, "Saving PNG")
         destination = self._screenshot_destination()
         try:
             destination.write_bytes(data)
         except Exception as e:
             raise TransferError(f"Screenshot could not be saved: {destination}: {e}") from e
 
+        self._set_progress(88, "Checking borders")
         margins = self._trim_black_screenshot_borders(destination)
         if margins:
             left, top, right, bottom = margins
@@ -1528,6 +1532,7 @@ class TransferApp(tk.Tk):
                 f"(left {left}px, top {top}px, right {right}px, bottom {bottom}px)."
             )
 
+        self._set_progress(96, "Screenshot saved")
         size_kib = destination.stat().st_size / 1024
         self.log(f"Screenshot saved locally: {destination} ({size_kib:.0f} KiB)")
         self._set_status("screenshot", f"Saved: {destination}")
@@ -1664,10 +1669,13 @@ class TransferApp(tk.Tk):
         return info
 
     def _check_endpoint(self, role: str) -> None:
+        self._set_progress(10, f"Checking {role}")
         self._set_status("result", "Check in progress …")
         info = self._inspect_endpoint(role)
+        self._set_progress(80, "Device identified")
         if role == "target":
             self._sync_checked_target_to_install(info)
+        self._set_progress(95, "Check OK")
         self._set_status("result", "Check OK")
 
     def _sync_checked_target_to_install(self, info: dict) -> None:
@@ -1788,9 +1796,12 @@ class TransferApp(tk.Tk):
         }
 
     def _check_install_target(self) -> None:
+        self._set_progress(10, "Checking device")
         self._set_status("install", "Checking device …")
         info = self._inspect_install_device()
+        self._set_progress(80, "Device identified")
         self._sync_checked_install_to_target(info)
+        self._set_progress(95, "Check OK")
         self._set_status("install", "Check OK")
 
     def _sync_checked_install_to_target(self, info: dict) -> None:
@@ -1849,11 +1860,14 @@ class TransferApp(tk.Tk):
         return profile
 
     def _install_or_update(self) -> None:
+        self._set_progress(5, "Checking installation file")
         path = Path(self.install_file_var.get().strip())
         if not path.is_file():
             raise TransferError(f"Installation file not found: {path}")
 
+        self._set_progress(12, "Checking target")
         info = self._inspect_install_device()
+        self._set_progress(22, "Target ready")
         if info["platform"] == "android":
             if path.suffix.lower() != ".apk":
                 raise TransferError("Android installation requires a local .apk file.")
@@ -2000,8 +2014,10 @@ class TransferApp(tk.Tk):
         ):
             raise TransferError("Installation was cancelled.")
 
+        self._set_progress(30, "Starting Android install")
         self._set_status("install", f"Installing {path.name} …")
         adb = self._find_or_install_adb()
+        self._set_progress(38, "Installing APK")
         cp = self._run(
             [str(adb), "-s", info["serial"], "install", "-r", str(path)],
             timeout=None,
@@ -2015,6 +2031,7 @@ class TransferApp(tk.Tk):
                 )
             raise TransferError(f"APK installation failed.{(' Device: ' + output) if output else ''}")
 
+        self._set_progress(78, "Verifying installation")
         after = self._discover_android_profiles(info["serial"])
         self._publish_install_profiles(after)
         after_map = {p["identifier"]: p for p in after}
@@ -2028,6 +2045,7 @@ class TransferApp(tk.Tk):
 
         if len(new_packages) == 1:
             p = new_packages[0]
+            self._set_progress(88, "Configuring Android permissions")
             self._configure_fresh_android_kodi_permissions(
                 info["serial"],
                 p["identifier"],
@@ -2042,6 +2060,7 @@ class TransferApp(tk.Tk):
         else:
             result = f"APK installed successfully: {path.name}"
 
+        self._set_progress(96, "Installation verified")
         self.log(result)
         self._set_status("install", result)
         self._ui_queue.put(("message", ("info", APP_TITLE, result)))
@@ -2050,6 +2069,7 @@ class TransferApp(tk.Tk):
         if not str(self._endpoint_vars["install"]["type"].get()).startswith("Android"):
             raise TransferError("Uninstall is available only for Android.")
 
+        self._set_progress(8, "Checking Android device")
         selected_text = str(self._endpoint_vars["install"]["profile"].get()).strip()
         info = self._inspect_install_device()
         if selected_text:
@@ -2084,14 +2104,20 @@ class TransferApp(tk.Tk):
 
         if backup_requested and profile["profile_exists"]:
             self.log("Creating profile backup before uninstall …")
-            backup_path, _ = self._create_backup(target, "install")
+            backup_path, _ = self._create_backup(
+                target,
+                "install",
+                progress_range=(18, 58),
+            )
 
+        self._set_progress(68, f"Uninstalling {profile['name']}")
         self._set_status("install", f"Uninstalling {profile['name']} …")
         cp = self._adb(info["serial"], "uninstall", profile["identifier"], timeout=120)
         output = (cp.stdout or "").strip()
         if cp.returncode != 0 or "success" not in output.lower():
             raise TransferError(f"Android uninstall failed.{(' Device: ' + output) if output else ''}")
 
+        self._set_progress(88, "Verifying uninstall")
         remaining = self._discover_android_profiles(info["serial"])
         self._publish_install_profiles(remaining)
         result = f"Uninstalled {profile['name']} ({profile['identifier']})"
@@ -2121,10 +2147,22 @@ class TransferApp(tk.Tk):
             if code != 0:
                 raise TransferError(f"Could not create LibreELEC update folder: {err}")
 
+            self._set_progress(30, "Preparing LibreELEC update")
             self._set_status("install", f"Uploading {path.name} …")
             self.log(f"Uploading update TAR to temporary file: {remote_temp}")
             sftp = client.open_sftp()
-            sftp.put(str(path), remote_temp)
+
+            def upload_progress(transferred: int, total: int) -> None:
+                self._set_progress_fraction(
+                    35,
+                    88,
+                    transferred,
+                    total,
+                    "Uploading update",
+                )
+
+            sftp.put(str(path), remote_temp, callback=upload_progress)
+            self._set_progress(90, "Verifying upload")
             remote_size = sftp.stat(remote_temp).st_size
             local_size = path.stat().st_size
             if remote_size != local_size:
@@ -2132,6 +2170,7 @@ class TransferApp(tk.Tk):
                     f"Uploaded TAR size mismatch: local {local_size} bytes, remote {remote_size} bytes."
                 )
 
+            self._set_progress(94, "Activating update")
             command = (
                 f"rm -f {shlex.quote(remote_final)} && "
                 f"mv {shlex.quote(remote_temp)} {shlex.quote(remote_final)}"
@@ -2361,23 +2400,40 @@ class TransferApp(tk.Tk):
         with tarfile.open(path, "a:") as tf:
             tf.addfile(ti, io.BytesIO(data))
 
-    def _create_backup(self, info: dict, role: str, leave_stopped: bool = False) -> tuple[Path, bool]:
+    def _create_backup(
+        self,
+        info: dict,
+        role: str,
+        leave_stopped: bool = False,
+        progress_range: tuple[float, float] | None = None,
+    ) -> tuple[Path, bool]:
+        progress_start, progress_end = progress_range or (15.0, 92.0)
+
+        def progress(fraction: float, text: str) -> None:
+            value = progress_start + (progress_end - progress_start) * fraction
+            self._set_progress(value, text)
+
+        progress(0.02, "Checking profile")
         if not info["profile_exists"] and not self._profile_nonempty(info, role):
             raise TransferError("The selected Kodi installation does not have a profile to back up yet.")
 
         destination = self._backup_destination(info)
+        progress(0.08, "Preparing backup")
         was_running = self._is_kodi_running(info, role)
         if was_running:
+            progress(0.14, "Stopping Kodi")
             self.log(f"Stopping {info['name']} for a consistent backup …")
             self._stop_kodi(info, role)
             time.sleep(1)
 
         try:
+            progress(0.20, "Transferring profile")
             self.log(f"Backing up complete Kodi profile directly to: {destination}")
             if info["platform"] == "android":
                 self._stream_android_backup(info, destination)
             else:
                 self._stream_ssh_backup(info, role, destination)
+            progress(0.88, "Finalizing backup")
             self._append_metadata(destination, info)
         except Exception:
             try:
@@ -2393,8 +2449,10 @@ class TransferApp(tk.Tk):
             raise
 
         if was_running and not leave_stopped:
+            progress(0.94, "Starting Kodi")
             self._start_kodi(info, role)
 
+        progress(1.0, "Backup complete")
         size_mb = destination.stat().st_size / (1024 * 1024)
         self.log(f"Backup complete: {destination} ({size_mb:.1f} MiB)")
         self._set_status("backup", str(destination))
@@ -2762,7 +2820,9 @@ class TransferApp(tk.Tk):
         target: dict,
         role: str,
         destination_root: str,
+        progress_range: tuple[float, float] | None = None,
     ) -> None:
+        progress_start, progress_end = progress_range or (45.0, 85.0)
         if target["platform"] == "android":
             adb = self._find_or_install_adb()
             self.log("Extracting restore archive locally on Windows …")
@@ -2781,8 +2841,28 @@ class TransferApp(tk.Tk):
                         f"Transferring extracted profile directly to Android staging "
                         f"({len(children)} top-level items) …"
                     )
+
+                    def local_data_size(path: Path) -> int:
+                        if path.is_file():
+                            return path.stat().st_size
+                        total = 0
+                        for item in path.rglob("*"):
+                            if item.is_file():
+                                total += item.stat().st_size
+                        return total
+
+                    child_sizes = {child: local_data_size(child) for child in children}
+                    total_bytes = sum(child_sizes.values())
+                    transferred_bytes = 0
                     remote_root = destination_root.rstrip("/") + "/"
                     for child in children:
+                        self._set_progress_fraction(
+                            progress_start,
+                            progress_end,
+                            transferred_bytes,
+                            total_bytes,
+                            f"Transferring {child.name}",
+                        )
                         cp = self._run(
                             [str(adb), "-s", target["serial"], "push", str(child), remote_root],
                             timeout=None,
@@ -2793,6 +2873,14 @@ class TransferApp(tk.Tk):
                                 f"ADB push failed while transferring {child.name}."
                                 + (f" Device: {detail}" if detail else "")
                             )
+                        transferred_bytes += child_sizes[child]
+                        self._set_progress_fraction(
+                            progress_start,
+                            progress_end,
+                            transferred_bytes,
+                            total_bytes,
+                            "Transferring profile",
+                        )
 
                     for link_type, name, link_target in links:
                         remote_path = destination_root.rstrip("/") + "/" + name
@@ -2825,6 +2913,8 @@ class TransferApp(tk.Tk):
 
         client = self._ssh_client(role)
         root = shlex.quote(destination_root)
+        total_bytes = archive.stat().st_size
+        transferred_bytes = 0
         try:
             self.log(f"$ ssh: tar -xf - -C {root}")
             stdin, stdout, stderr = client.exec_command(f"tar -xf - -C {root}")
@@ -2836,6 +2926,14 @@ class TransferApp(tk.Tk):
                         if not chunk:
                             break
                         stdin.write(chunk)
+                        transferred_bytes += len(chunk)
+                        self._set_progress_fraction(
+                            progress_start,
+                            progress_end,
+                            transferred_bytes,
+                            total_bytes,
+                            "Transferring restore",
+                        )
             except Exception as e:
                 stream_error = e
             finally:
@@ -2974,7 +3072,18 @@ class TransferApp(tk.Tk):
         role: str,
         confirm: bool = True,
         display_backup: Path | None = None,
+        progress_range: tuple[float, float] | None = None,
     ) -> Path | None:
+        progress_start, progress_end = progress_range or (15.0, 94.0)
+
+        def progress(fraction: float, text: str) -> None:
+            value = progress_start + (progress_end - progress_start) * fraction
+            self._set_progress(value, text)
+
+        def progress_value(fraction: float) -> float:
+            return progress_start + (progress_end - progress_start) * fraction
+
+        progress(0.02, "Reading backup")
         shown_backup = display_backup or backup
         meta, legacy_wrapped = self._read_backup(backup)
         full_restore, mode = self._compatibility_mode(meta, target)
@@ -2995,6 +3104,7 @@ class TransferApp(tk.Tk):
             ):
                 raise TransferError("Restore was cancelled.")
 
+        progress(0.08, "Preparing target")
         self._ensure_target_profile(target, role)
         was_running = self._is_kodi_running(target, role)
         safety_path: Path | None = None
@@ -3007,12 +3117,18 @@ class TransferApp(tk.Tk):
         try:
             if self.safety_backup_var.get() and self._profile_nonempty(target, role):
                 self.log("Creating a safety backup of the existing target profile …")
-                safety_path, safety_was_running = self._create_backup(target, role, leave_stopped=True)
+                safety_path, safety_was_running = self._create_backup(
+                    target,
+                    role,
+                    leave_stopped=True,
+                    progress_range=(progress_value(0.10), progress_value(0.34)),
+                )
                 was_running = was_running or safety_was_running
             elif was_running:
                 self._stop_kodi(target, role)
                 time.sleep(1)
 
+            progress(0.36, "Preparing restore staging")
             stage = self._prepare_restore_stage(target, role)
             staged = True
 
@@ -3029,6 +3145,7 @@ class TransferApp(tk.Tk):
                     legacy_wrapped,
                 )
                 prepared_is_temp = True
+                progress(0.45, "Preparing portable add-ons")
                 self._remove_stage_portable_addons(
                     target,
                     role,
@@ -3040,8 +3157,15 @@ class TransferApp(tk.Tk):
                     f"hardware-dependent source add-ons skipped: {len(details['binary_addons'])}."
                 )
 
-            self._extract_archive_to_dir(prepared_archive, target, role, stage)
+            self._extract_archive_to_dir(
+                prepared_archive,
+                target,
+                role,
+                stage,
+                progress_range=(progress_value(0.48), progress_value(0.82)),
+            )
 
+            progress(0.84, "Validating restored profile")
             # New-format backups contain metadata at archive root. It is useful in the
             # backup file, but must not become part of Kodi's live profile.
             self._target_exec(
@@ -3052,18 +3176,22 @@ class TransferApp(tk.Tk):
             )
             self._validate_restore_stage(target, role, stage)
 
+            progress(0.89, "Activating restored profile")
             self.log("Restore transferred completely. Activating new profile …")
             self._activate_restore_stage(target, role)
             swapped = True
             staged = False
 
+            progress(0.94, "Starting Kodi")
             self._start_kodi(target, role)
             time.sleep(3)
             if not self._is_kodi_running(target, role):
                 raise TransferError("Kodi did not start with the restored profile.")
 
+            progress(0.98, "Committing restore")
             self._commit_restore_stage(target, role)
             swapped = False
+            progress(1.0, "Restore complete")
 
             if details["binary_addons"]:
                 self.log("Not copied (hardware-dependent source add-ons): " + ", ".join(details["binary_addons"]))
@@ -3109,18 +3237,25 @@ class TransferApp(tk.Tk):
 
     # ---------- workflows ----------
     def _backup_only(self) -> None:
+        self._set_progress(5, "Checking source")
         self._set_status("result", "Backup in progress …")
         source = self._inspect_endpoint("source")
-        path, _ = self._create_backup(source, "source")
+        path, _ = self._create_backup(
+            source,
+            "source",
+            progress_range=(15, 95),
+        )
         self.backup_file_var.set(str(path))
         self._save_config()
         self._set_status("result", "SUCCESS – Backup created")
         self._ui_queue.put(("message", ("info", APP_TITLE, f"Backup created:\n\n{path}")))
 
     def _restore_only(self) -> None:
+        self._set_progress(5, "Checking target")
         self._set_status("result", "Restore in progress …")
         backup = Path(self.backup_file_var.get().strip())
         target = self._inspect_endpoint("target")
+        self._set_progress(12, "Preparing backup")
         local_backup, temp_copy = self._localize_restore_source(backup)
         try:
             safety = self._restore_backup(
@@ -3129,6 +3264,7 @@ class TransferApp(tk.Tk):
                 "target",
                 confirm=True,
                 display_backup=backup,
+                progress_range=(15, 96),
             )
         finally:
             if temp_copy is not None:
@@ -3150,8 +3286,10 @@ class TransferApp(tk.Tk):
         )
 
     def _transfer(self) -> None:
+        self._set_progress(4, "Checking source")
         self._set_status("result", "Transfer A → B in progress …")
         source = self._inspect_endpoint("source")
+        self._set_progress(8, "Checking target")
         target = self._inspect_endpoint("target")
         if self._same_endpoint(source, target):
             raise TransferError("Source and target are the same Kodi installation.")
@@ -3164,7 +3302,11 @@ class TransferApp(tk.Tk):
         ):
             raise TransferError("Transfer was cancelled.")
 
-        backup, _ = self._create_backup(source, "source")
+        backup, _ = self._create_backup(
+            source,
+            "source",
+            progress_range=(12, 40),
+        )
         self.backup_file_var.set(str(backup))
         self._save_config()
         local_backup, temp_copy = self._localize_restore_source(backup)
@@ -3175,6 +3317,7 @@ class TransferApp(tk.Tk):
                 "target",
                 confirm=False,
                 display_backup=backup,
+                progress_range=(42, 96),
             )
         finally:
             if temp_copy is not None:
