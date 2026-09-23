@@ -1,197 +1,91 @@
 # JJS KODI Toolbox
 
-A Windows toolbox for managing Kodi installations, profiles, and screenshots on:
-
-- Android / NVIDIA Shield via ADB
-- LibreELEC via SSH
+Windows toolbox for managing Kodi on **Android / NVIDIA Shield (ADB)** and **LibreELEC (SSH)**.
 
 Current version: **1.13**
 
-The application name reflects its expanded scope: profile backup/restore/transfer, Kodi installation/update/uninstall, and screenshot capture are combined in one utility.
+## What it does
 
-The application has three separate areas:
+- **Backup Kodi profiles**
+  - Complete profile backup to a local TAR file
+  - Optional automatic safety backup before restore/uninstall
 
-- **Profile Backup / Restore / Transfer**
-- **Kodi Install / Update**
-- **Screenshots**
+- **Restore and transfer profiles**
+  - Restore a backup to another Kodi installation
+  - Direct transfer from Source A to Target B
+  - Same-platform restore: complete profile
+  - Cross-platform restore: keeps the target `Addons*.db`, restores portable add-ons/settings, skips platform-dependent binary add-ons
 
-The Profile and Install tabs show the same target device. Connection type, IP address, port, SSH credentials, and the detected Kodi installations are synchronized so the target does not need to be entered twice.
+- **Install / update Kodi**
+  - Android: install or update a local APK with `adb install -r`
+  - Android: detect multiple Kodi installations and uninstall a selected one
+  - Fresh Android installs: configure microphone and "All files" access where supported
+  - LibreELEC: upload a local update TAR to `/storage/.update/` and optionally reboot
 
-The Screenshots tab shares its connection data directly with **Source A** in the Profile tab. Changes made in either place are visible immediately in the other.
+- **Take Kodi screenshots**
+  - Android: capture directly over ADB; no screenshot file is left on the device
+  - LibreELEC: temporary screenshot is downloaded and removed immediately
+  - Saves directly to a selectable Windows folder
+  - Removes narrow black / near-black outer borders automatically
+  - Filename: `Device (IP)-YYDDMM-HHMM.png`
 
-All Kodi installation and update files are selected locally. The tool does not download Kodi builds.
+- **Shared device state**
+  - Screenshot tab mirrors **Source A**
+  - Install / Update tab mirrors **Target B**
+  - Device type, IP, port, Kodi selection and status stay synchronized
 
-## Profile Backup / Restore / Transfer
+- **Progress display**
+  - Determinate 0–100% progress instead of an animated activity bar
+  - Real byte progress where available; phase progress where the underlying tool exposes no usable percentage
 
-The profile tools can create a complete Kodi profile backup, restore a backup to another Kodi installation, or transfer a profile directly from one device to another.
+## Supported systems
 
-Backups are stored as uncompressed TAR archives and include transfer metadata used to decide which parts of a profile are safe to restore on the target system.
+- **Android / NVIDIA Shield**
+  - Developer options enabled
+  - Network ADB enabled
+  - PC and device reachable over the network
+  - If ADB is missing, the toolbox can download the official Android Platform Tools
 
-### Restore policy
+- **LibreELEC**
+  - SSH enabled
+  - SSH password is entered at runtime and is **not stored**
 
-#### Same platform
+## Download
 
-A full profile restore is performed.
-
-#### Cross-platform
-
-The target Kodi add-on database (`Addons*.db`) is preserved.
-
-Portable source add-ons and their settings are restored. Platform-dependent or binary add-ons are skipped automatically so that an Android profile can, for example, be transferred to LibreELEC without replacing the target system's architecture-specific add-on state.
-
-Keymaps, library nodes, and the normal Kodi userdata profile are restored.
-
-An optional safety backup of the existing target profile can be created automatically before restore.
-
-## Kodi Install / Update
-
-The second application tab installs or updates Kodi from a **local file**.
-
-Connection settings are intentionally similar to the profile tools. Options that are irrelevant to the selected platform are hidden automatically.
-
-### Android / NVIDIA Shield
-
-Select a local `.apk` file and an Android device connected through ADB.
-
-The tool uses Android's normal package installation mechanism:
-
-- If the APK package is not installed yet, it is installed as a new application.
-- If the same package is already installed and the APK signature is compatible, the existing application is updated with `adb install -r`.
-- Existing application data and the Kodi profile are retained during a normal update.
-- If the APK signature does not match the installed application, Android rejects the update. **The tool never automatically uninstalls the existing application to work around a signature mismatch.**
-
-The package ID embedded in the APK determines which application Android installs or updates. This allows multiple Kodi variants to coexist, for example:
-
-- `org.xbmc.kodi` — Kodi
-- `org.jjs.kodi` — Kodi JJS
-
-The tool detects installed Kodi packages on the device. If more than one Kodi installation is present, a specific installation can be selected from the list for uninstalling. Package IDs do not need to be typed manually.
-
-#### Android uninstall
-
-A selected Kodi installation can be uninstalled explicitly.
-
-Before uninstalling, the tool can create a complete profile backup using the same proven backup mechanism as the profile tab. This option is enabled by default.
-
-Android uninstall removes the selected application and its application data. The tool therefore requires explicit confirmation and never performs an uninstall automatically as part of an update.
-
-### LibreELEC
-
-Select a local LibreELEC `.tar` update file and connect to an existing LibreELEC system through SSH.
-
-The tool:
-
-1. verifies that the SSH target identifies itself as LibreELEC,
-2. uploads the TAR to `/storage/.update/`,
-3. verifies the uploaded file size,
-4. places the completed upload in the update directory,
-5. asks whether LibreELEC should be restarted immediately.
-
-If you choose not to restart, the update remains staged and can be installed by rebooting LibreELEC later.
-
-This function updates an **existing LibreELEC installation**. It does not install LibreELEC onto a blank device.
-
-## Screenshots
-
-The third application tab captures the current Kodi screen and saves the PNG directly to a user-selectable folder on the Windows PC.
-
-The connection settings are the same live values used by **Source A** in the Profile tab.
-
-Screenshot filenames use the device and source IP plus the capture time:
-
-`Device (IP)-YYDDMM-HHMM.png`
-
-For example: `LibreELEC (192.168.1.20)-262309-1538.png`.
-
-### Android / NVIDIA Shield
-
-The screenshot is captured with ADB using Android's screen-capture stream and is written directly to the local PC. No screenshot file is created on the Android device.
-
-### LibreELEC
-
-The tool asks Kodi to create a screenshot in a uniquely named file under `/tmp`, downloads it immediately over the existing SSH connection, and deletes the temporary file in a `finally` cleanup path.
-
-Kodi's LibreELEC screenshot interface requires a filename, so a temporary file exists for the duration of the capture. Nothing is intentionally retained in Kodi's normal screenshot folders or in the Kodi profile.
-
-Some LibreELEC/Kodi display backends, especially GBM-based systems, may not support Kodi screenshots correctly and can return no image or an all-black image. The tool reports a missing screenshot as an error and logs an all-black capture.
-
-### Black border trimming
-
-Thin black outer borders are removed automatically before the PNG is finalized. LibreELEC screenshots can contain edge bands that are visually black but have tiny non-zero pixel values, so the trimming also recognizes narrow contiguous near-black borders with a clear transition to the actual image. The crop remains deliberately limited to narrow outer-edge areas.
-
-## Supported connections
-
-### Android / NVIDIA Shield
-
-Android devices are accessed through **ADB (Android Debug Bridge)**.
-
-Requirements:
-
-- Developer options must be enabled on the Android device / NVIDIA Shield.
-- Network debugging / ADB over network must be enabled on the device.
-- The Windows PC and the Android device must be able to reach each other over the network.
-
-A manual ADB installation is **not required**. The application first looks for `adb.exe` in the configured ADB folder and in the Windows `PATH`. If ADB is not found, it offers to download and install the official Android Platform Tools directly from Google. The default installation folder is `C:\\ADB`.
-
-The exact name of the debugging option can differ between Android versions and devices. On NVIDIA Shield it is available under the developer options as network debugging.
-
-### LibreELEC
-
-LibreELEC is accessed through SSH.
-
-SSH host keys are verified and stored locally after first confirmation. SSH passwords are entered at runtime and are not written to the application's configuration file.
-
-## Windows build
-
-The Windows executable is built automatically with GitHub Actions and PyInstaller. Pillow is included for conservative black-border trimming of screenshots.
-
-Download the current executable from:
+Get the current Windows build from:
 
 **Releases → JJS KODI Toolbox 1.13**
 
-Release files:
+Files:
 
 - `JJS-KODI-Toolbox.exe`
 - `SHA256SUMS.txt`
 
-The source used for the build is:
+The Windows EXE is built automatically with GitHub Actions and PyInstaller.
 
-`installer/jjs_kodi_toolbox.py`
+## Local data
 
-The repository source is the authoritative project state.
+Stored under:
 
-## Local application data
+`%LOCALAPPDATA%\JJSKodiToolbox\`
 
-JJS KODI Toolbox stores its local configuration, SSH host keys, and logs below:
+Contains configuration, SSH host keys and logs. SSH passwords are never stored.
 
-`%LOCALAPPDATA%\\JJSKodiToolbox\\`
+## Important
 
-This is intentionally a new application-data location. Existing data from earlier JJS KODI Profile Transfer builds is not migrated or reused. SSH passwords are never stored.
+Restore, transfer, update and uninstall operations can change or remove Kodi data.
 
-## Important warning
-
-Restore, transfer, install, update, and uninstall operations can change or remove Kodi data or software.
-
-Although the tool contains platform checks, cross-platform filtering, optional safety backups, explicit confirmations, and conservative update behavior, a failed transfer, incompatible build, unusual Kodi configuration, network interruption, device problem, or software bug can still damage or overwrite data.
-
-**Keep an independent backup of any Kodi profile that matters before using restore, transfer, update, or uninstall functions.**
+**Keep an independent backup of important Kodi profiles.**
 
 ## Disclaimer
 
-This project was originally created for my own personal use. I am making the source code and prebuilt Windows binaries available for anyone who may find them useful.
-
-This is an independent, unofficial community project. It is **not an official Kodi project** and is not affiliated with or endorsed by Team Kodi, the Kodi Foundation, or LibreELEC.
-
-The software is provided **as is**, without warranty of any kind. Use it at your own risk. I do not guarantee compatibility with any particular Kodi version, device, operating system, add-on, network environment, APK, LibreELEC image, or configuration.
-
-There is **no commitment or obligation to provide support, bug fixes, future updates, maintenance, compatibility updates, or future releases**.
-
-To the maximum extent permitted by applicable law, the author shall not be liable for loss of data, configuration, functionality, availability, or other damages arising from the use of, or inability to use, this software.
+- Independent, unofficial community project
+- Not affiliated with or endorsed by Team Kodi, the Kodi Foundation or LibreELEC
+- Provided **as is**, without warranty or support commitment
+- Use at your own risk
 
 ## License
 
-The JJS KODI Toolbox source code in this repository is released under the **MIT License**. See [LICENSE](LICENSE).
+MIT License. See [LICENSE](LICENSE).
 
-The Windows executable is built with third-party open-source components and uses external tools such as Android ADB. Those projects remain subject to their own licenses and terms.
-
-Kodi, LibreELEC, Android, and the names of third-party projects belong to their respective owners.
+Kodi, LibreELEC, Android and third-party project names belong to their respective owners.
