@@ -280,7 +280,7 @@ class TransferApp(tk.Tk):
         ttk.Label(outer, text=APP_TITLE, font=("Segoe UI", 16, "bold")).pack(anchor="w")
         ttk.Label(
             outer,
-            text="Manage Kodi profiles and install or update Kodi on Android/ADB and LibreELEC/SSH.",
+            text="Manage Kodi profiles, install or update Kodi, and capture screenshots on Android/ADB and LibreELEC/SSH.",
         ).pack(anchor="w", pady=(2, 10))
 
         self.adb_dir_var = tk.StringVar(value=str(self._cfg.get("adb_dir", DEFAULT_ADB_DIR)))
