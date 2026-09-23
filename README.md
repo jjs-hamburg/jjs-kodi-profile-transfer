@@ -26,7 +26,8 @@ Current version: **1.14**
   - MusicDB and VideoDB independently
   - MariaDB and local SQLite
   - Uses the existing JJS Music Library Manager ZIP backup format (version 2)
-  - Automatically detects the active database from the selected Source A Kodi
+  - Either read MariaDB credentials automatically from Source A's `advancedsettings.xml` or connect directly to a MariaDB server
+  - Direct MariaDB mode stores server/port/user/prefixes, but never the password
   - Verifies backup checksums and schema version before restore
   - SQLite is stopped, rebuilt and verified before replacing the active DB
 
