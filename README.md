@@ -1,11 +1,13 @@
-# JJS KODI Profile Backup/Restore, Transfer & Install
+# JJS KODI Toolbox
 
-A Windows tool for managing Kodi installations and profiles on:
+A Windows toolbox for managing Kodi installations, profiles, and screenshots on:
 
 - Android / NVIDIA Shield via ADB
 - LibreELEC via SSH
 
 Current version: **1.13**
+
+The application name reflects its expanded scope: profile backup/restore/transfer, Kodi installation/update/uninstall, and screenshot capture are combined in one utility.
 
 The application has three separate areas:
 
@@ -145,18 +147,18 @@ The Windows executable is built automatically with GitHub Actions and PyInstalle
 
 Download the current executable from:
 
-**Releases → JJS KODI Profile Backup/Restore, Transfer & Install 1.13**
+**Releases → JJS KODI Toolbox 1.13**
 
 Release files:
 
-- `JJS-KODI-Profile-Backup-Restore-Transfer.exe`
+- `JJS-KODI-Toolbox.exe`
 - `SHA256SUMS.txt`
 
 The executable filename is retained for continuity with earlier releases.
 
 The source used for the build is:
 
-`installer/jjs_kodi_profile_transfer.py`
+`installer/jjs_kodi_toolbox.py`
 
 The repository source is the authoritative project state.
 
@@ -182,7 +184,7 @@ To the maximum extent permitted by applicable law, the author shall not be liabl
 
 ## License
 
-The JJS KODI Profile Backup/Restore, Transfer & Install source code in this repository is released under the **MIT License**. See [LICENSE](LICENSE).
+The JJS KODI Toolbox source code in this repository is released under the **MIT License**. See [LICENSE](LICENSE).
 
 The Windows executable is built with third-party open-source components and uses external tools such as Android ADB. Those projects remain subject to their own licenses and terms.
 
