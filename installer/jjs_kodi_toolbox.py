@@ -249,7 +249,12 @@ class TransferApp(tk.Tk):
         self._action_buttons: list[ttk.Button] = []
         self._progress_bars: dict[str, ttk.Progressbar] = {}
         self._progress_vars: dict[str, tk.StringVar] = {}
-        self._progress_values: dict[str, float] = {}
+        self._progress_values: dict[str, float] = {
+            "profile": 0.0,
+            "install": 0.0,
+            "screenshot": 0.0,
+            "database": 0.0,
+        }
         self._active_progress_key: str | None = None
         self._log_widgets: list[tk.Text] = []
         self._cancel_event = threading.Event()
@@ -419,18 +424,6 @@ class TransferApp(tk.Tk):
             b.pack(side="left", padx=(0, 8))
             self._action_buttons.append(b)
 
-        self.profile_progress = ttk.Progressbar(
-            actions, mode="determinate", maximum=100, length=220
-        )
-        self.profile_progress.pack(side="right")
-        self.profile_progress_var = tk.StringVar(value="Ready")
-        ttk.Label(actions, textvariable=self.profile_progress_var, width=24, anchor="e").pack(
-            side="right", padx=(0, 8)
-        )
-        self._progress_bars["profile"] = self.profile_progress
-        self._progress_vars["profile"] = self.profile_progress_var
-        self._progress_values["profile"] = 0.0
-
         status = ttk.LabelFrame(outer, text="Status", padding=8)
         status.pack(fill="x", pady=(0, 10))
         status.columnconfigure(1, weight=1)
@@ -503,18 +496,6 @@ class TransferApp(tk.Tk):
         )
         self.uninstall_button.pack(side="left", padx=(0, 8))
         self._action_buttons.append(self.uninstall_button)
-
-        self.install_progress = ttk.Progressbar(
-            actions, mode="determinate", maximum=100, length=220
-        )
-        self.install_progress.pack(side="right")
-        self.install_progress_var = tk.StringVar(value="Ready")
-        ttk.Label(actions, textvariable=self.install_progress_var, width=24, anchor="e").pack(
-            side="right", padx=(0, 8)
-        )
-        self._progress_bars["install"] = self.install_progress
-        self._progress_vars["install"] = self.install_progress_var
-        self._progress_values["install"] = 0.0
 
         self.uninstall_backup_check = ttk.Checkbutton(
             outer,
@@ -606,18 +587,6 @@ class TransferApp(tk.Tk):
         )
         self.screenshot_button.pack(side="left", padx=(0, 8))
         self._action_buttons.append(self.screenshot_button)
-
-        self.screenshot_progress = ttk.Progressbar(
-            actions, mode="determinate", maximum=100, length=220
-        )
-        self.screenshot_progress.pack(side="right")
-        self.screenshot_progress_var = tk.StringVar(value="Ready")
-        ttk.Label(actions, textvariable=self.screenshot_progress_var, width=24, anchor="e").pack(
-            side="right", padx=(0, 8)
-        )
-        self._progress_bars["screenshot"] = self.screenshot_progress
-        self._progress_vars["screenshot"] = self.screenshot_progress_var
-        self._progress_values["screenshot"] = 0.0
 
         status = ttk.LabelFrame(outer, text="Status", padding=8)
         status.pack(fill="x", pady=(0, 10))
@@ -752,18 +721,6 @@ class TransferApp(tk.Tk):
             )
             button.pack(side="left", padx=(0, 8))
             self._action_buttons.append(button)
-
-        self.database_progress = ttk.Progressbar(
-            actions, mode="determinate", maximum=100, length=200
-        )
-        self.database_progress.pack(side="right")
-        self.database_progress_var = tk.StringVar(value="Ready")
-        ttk.Label(actions, textvariable=self.database_progress_var, width=23, anchor="e").pack(
-            side="right", padx=(0, 8)
-        )
-        self._progress_bars["database"] = self.database_progress
-        self._progress_vars["database"] = self.database_progress_var
-        self._progress_values["database"] = 0.0
 
         status = ttk.LabelFrame(outer, text="Status", padding=8)
         status.pack(fill="x", pady=(0, 10))
@@ -1032,7 +989,7 @@ class TransferApp(tk.Tk):
             )
         if hasattr(self, "uninstall_button"):
             if is_android:
-                self.uninstall_button.pack(side="left", padx=(0, 8), before=self.install_progress)
+                self.uninstall_button.pack(side="left", padx=(0, 8))
                 self.uninstall_backup_check.pack(
                     anchor="w",
                     pady=(0, 8),
@@ -2434,6 +2391,7 @@ class TransferApp(tk.Tk):
                     context["config"],
                     destination,
                     kodi_version=(info or {}).get("version", ""),
+                    source_id=str(context["config"].get("host") or ""),
                     progress=lambda value, text: self._set_progress(value, text),
                     log=self.log,
                 )
@@ -2457,6 +2415,7 @@ class TransferApp(tk.Tk):
                             context["filename"],
                             destination,
                             kodi_version=info.get("version", ""),
+                            source_id=str(info.get("ip") or ""),
                             progress=lambda value, text: self._set_progress(35 + value * 0.62, text),
                             log=self.log,
                         )
