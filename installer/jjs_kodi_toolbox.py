@@ -2443,19 +2443,39 @@ class TransferApp(tk.Tk):
         except Exception as exc:
             raise TransferError(f"Backup validation failed: {exc}") from exc
 
-        self._set_progress(4, "Checking target database")
+        self._set_progress(4, "Checking restore target")
         info, source_text = self._database_source()
         self._set_status("database_source", source_text)
-        context = self._database_describe(info, kind)
-        self._set_status(f"{kind}_db", context["text"])
+        context = self._database_config(info, kind)
         backup_engine = kodi_db.backup_engine(manifest)
         if backup_engine != context["engine"]:
             raise TransferError(
-                f"Backup uses {backup_engine.upper()}, but the active {label} uses {context['engine'].upper()}."
+                f"Backup uses {backup_engine.upper()}, but the configured {label} uses {context['engine'].upper()}."
             )
 
         backup_db = str(manifest.get("source_database") or "?")
         backup_version = int(manifest.get("schema_version") or -1)
+
+        if context["engine"] == "mariadb":
+            try:
+                target = kodi_db.resolve_mariadb_restore_target(
+                    context["config"], kind, backup_version
+                )
+            except Exception as exc:
+                raise TransferError(f"{label} restore target check failed: {exc}") from exc
+            context = {
+                **context,
+                "database": target["database"],
+                "schema_version": target["schema_version"],
+                "text": (
+                    f"MariaDB | {context['config']['host']}:{context['config']['port']} | "
+                    f"{target['database']} | restore schema {backup_version}"
+                ),
+            }
+        else:
+            context = self._database_describe(info, kind)
+
+        self._set_status(f"{kind}_db", context["text"])
         if info is None:
             runtime_note = (
                 "No Kodi instance is controlled in direct-server mode.\n"
