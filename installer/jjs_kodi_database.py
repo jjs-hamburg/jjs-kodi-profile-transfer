@@ -161,12 +161,33 @@ def _execute_insert_resilient(execute, statement: str, table_name: str, log=None
         return skipped
 
 
-def make_backup_name(db_name: str) -> str:
-    stamp = dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    safe_db = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(db_name or "KodiDB"))
+def _safe_backup_part(value: str, fallback: str) -> str:
+    text = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or fallback)).strip("._-")
+    return text or fallback
+
+
+def make_backup_name(db_name: str, source_id: str = "") -> str:
+    stamp = dt.datetime.now().strftime("%y%m%d-%H%M")
+    safe_db = _safe_backup_part(db_name, "KodiDB")
     if safe_db.lower().endswith(".db"):
         safe_db = safe_db[:-3]
-    return f"JJS-{safe_db}-{stamp}.zip"
+    safe_source = _safe_backup_part(source_id, "unknown")
+    return f"{safe_db}-{safe_source}-{stamp}.zip"
+
+
+def _unique_backup_destination(destination_folder: Path, db_name: str, source_id: str) -> Path:
+    folder = Path(destination_folder)
+    candidate = folder / make_backup_name(db_name, source_id)
+    if not candidate.exists():
+        return candidate
+    stem = candidate.stem
+    suffix = candidate.suffix
+    n = 2
+    while True:
+        numbered = folder / f"{stem}-{n}{suffix}"
+        if not numbered.exists():
+            return numbered
+        n += 1
 
 
 def parse_advancedsettings(xml_text: str, kind: str) -> dict | None:
@@ -561,11 +582,12 @@ def backup_mariadb(
     cfg: dict,
     destination_folder: Path,
     kodi_version: str = "",
+    source_id: str = "",
     progress=None,
     log=None,
 ) -> dict:
     db_name, schema_version = discover_mariadb(cfg, kind)
-    destination = Path(destination_folder) / make_backup_name(db_name)
+    destination = _unique_backup_destination(destination_folder, db_name, source_id or cfg.get("host", ""))
     _progress(progress, 4, "Connecting to MariaDB")
     con = _connect_maria(cfg, db_name, maintenance=True)
     try:
@@ -1093,12 +1115,13 @@ def backup_sqlite(
     source_database: str,
     destination_folder: Path,
     kodi_version: str = "",
+    source_id: str = "",
     progress=None,
     log=None,
 ) -> dict:
     sqlite_path = Path(sqlite_path)
     source_name = Path(source_database).stem
-    destination = Path(destination_folder) / make_backup_name(source_name)
+    destination = _unique_backup_destination(destination_folder, source_name, source_id)
     _progress(progress, 4, "Opening SQLite database")
     con = sqlite3.connect(str(sqlite_path))
     try:
