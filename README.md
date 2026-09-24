@@ -28,6 +28,7 @@ Current version: **1.14**
   - Uses the existing JJS Music Library Manager ZIP backup format (version 2)
   - Either read MariaDB credentials automatically from Source A's `advancedsettings.xml` or connect directly to a MariaDB server
   - Direct MariaDB mode stores server/port/user/prefixes, but never the password
+  - Backup filename: `DBname-IP-YYMMDD-HHMM.zip` (SQLite uses the Kodi device IP; MariaDB uses the DB server host/IP)
   - Verifies backup checksums and schema version before restore
   - SQLite is stopped, rebuilt and verified before replacing the active DB
 
