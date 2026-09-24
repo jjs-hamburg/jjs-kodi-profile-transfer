@@ -79,6 +79,88 @@ def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _split_insert_rows(statement: str) -> tuple[str, list[str]] | None:
+    """Split one generated multi-row INSERT into its row tuples.
+
+    Used only as a recovery path after a bulk INSERT fails. The parser understands
+    quoted SQL strings, doubled quotes and MariaDB-style backslash escapes.
+    """
+    text = str(statement or "").strip()
+    match = re.match(r"(?is)^(INSERT\s+INTO\s+.+?\s+VALUES\s+)(.*?);?\s*$", text)
+    if not match:
+        return None
+    prefix = match.group(1)
+    body = match.group(2).strip()
+    rows: list[str] = []
+    start = None
+    depth = 0
+    quote = ""
+    escaped = False
+    i = 0
+    while i < len(body):
+        ch = body[i]
+        if quote:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == quote:
+                if i + 1 < len(body) and body[i + 1] == quote:
+                    i += 1
+                else:
+                    quote = ""
+        else:
+            if ch in ("'", '"'):
+                quote = ch
+            elif ch == "(":
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth < 0:
+                    return None
+                if depth == 0 and start is not None:
+                    rows.append(body[start : i + 1])
+                    start = None
+            elif depth == 0 and ch not in (" ", "\t", "\r", "\n", ","):
+                return None
+        i += 1
+    if quote or depth != 0 or start is not None or not rows:
+        return None
+    return prefix, rows
+
+
+def _execute_insert_resilient(execute, statement: str, table_name: str, log=None) -> int:
+    """Execute a generated INSERT; on failure retry row-by-row and skip bad rows."""
+    try:
+        execute(statement)
+        return 0
+    except Exception as bulk_error:
+        split = _split_insert_rows(statement)
+        if split is None:
+            raise
+        prefix, rows = split
+        _log(
+            log,
+            f"WARNING: bulk insert failed in {table_name}; retrying {len(rows)} row(s) individually: {bulk_error}",
+        )
+        skipped = 0
+        for index, row_sql in enumerate(rows, start=1):
+            try:
+                execute(prefix + row_sql + ";")
+            except Exception as row_error:
+                skipped += 1
+                preview = row_sql.replace("\r", " ").replace("\n", " ")
+                if len(preview) > 180:
+                    preview = preview[:177] + "..."
+                _log(
+                    log,
+                    f"WARNING: skipped bad row {index} in {table_name}: {row_error} | {preview}",
+                )
+        return skipped
+
+
 def make_backup_name(db_name: str) -> str:
     stamp = dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     safe_db = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(db_name or "KodiDB"))
@@ -756,31 +838,47 @@ def _apply_maria_charset(con, db_name: str, info: dict) -> None:
             cur.execute(f"ALTER DATABASE {_safe_ident(db_name)} CHARACTER SET {charset}")
 
 
-def _restore_maria_data(con, zf: zipfile.ZipFile, table_item: dict) -> None:
+def _restore_maria_data(con, zf: zipfile.ZipFile, table_item: dict, log=None) -> int:
     data_file = str(table_item.get("data_file") or "")
+    table_name = str(table_item.get("name") or data_file or "?")
+    skipped = 0
     with zf.open(data_file, "r") as raw:
         for raw_line in raw:
             line = raw_line.decode("utf-8").strip()
             if line:
-                with con.cursor() as cur:
-                    cur.execute(line)
+                def execute(statement: str) -> None:
+                    with con.cursor() as cur:
+                        cur.execute(statement)
+                skipped += _execute_insert_resilient(execute, line, table_name, log)
+    return skipped
 
 
-def _verify_maria(con, manifest: dict, schema: dict) -> dict:
+def _verify_maria(
+    con,
+    manifest: dict,
+    schema: dict,
+    skipped_by_table: dict[str, int] | None = None,
+) -> dict:
     expected_version = int(manifest.get("schema_version") or -1)
     actual_version = _schema_version_maria(con)
     if actual_version != expected_version:
         raise RuntimeError(
             f"Schema version after restore is {actual_version}, expected {expected_version}."
         )
+    skipped_by_table = skipped_by_table or {}
     for item in manifest.get("tables") or []:
         name = str(item.get("name") or "")
-        expected = int(item.get("rows") or 0)
+        original_expected = int(item.get("rows") or 0)
+        skipped = int(skipped_by_table.get(name, 0))
+        expected = original_expected - skipped
         with con.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM {_safe_ident(name)}")
             actual = int((cur.fetchone() or (0,))[0] or 0)
         if actual != expected:
-            raise RuntimeError(f"Table {name}: {actual} rows after restore, expected {expected}.")
+            raise RuntimeError(
+                f"Table {name}: {actual} rows after restore, expected {expected} "
+                f"({skipped} skipped from {original_expected})."
+            )
     with con.cursor() as cur:
         cur.execute("SELECT DATABASE()")
         row = cur.fetchone()
@@ -865,10 +963,14 @@ def restore_mariadb(
 
             _progress(progress, 10, "Restoring table structure")
             _maria_create_with_retries(con, tables, "Table")
+            skipped_by_table: dict[str, int] = {}
             total = max(1, len(tables))
             for idx, item in enumerate(tables):
-                _progress(progress, 12 + int((idx / total) * 66), f"Data: {item.get('name') or '?'}")
-                _restore_maria_data(con, zf, item)
+                table_name = str(item.get("name") or "?")
+                _progress(progress, 12 + int((idx / total) * 66), f"Data: {table_name}")
+                skipped = _restore_maria_data(con, zf, item, log)
+                if skipped:
+                    skipped_by_table[table_name] = skipped
 
             _progress(progress, 80, "Restoring routines")
             _maria_create_with_retries(con, routines, "Routine")
@@ -882,7 +984,11 @@ def restore_mariadb(
         with con.cursor() as cur:
             cur.execute("SET FOREIGN_KEY_CHECKS=1")
         _progress(progress, 94, "Verifying restore")
-        summary = _verify_maria(con, manifest, restore_schema)
+        summary = _verify_maria(con, manifest, restore_schema, skipped_by_table)
+        skipped_rows = sum(skipped_by_table.values())
+        summary["skipped_rows"] = skipped_rows
+        if skipped_rows:
+            _log(log, f"WARNING: MariaDB restore completed with {skipped_rows} skipped row(s).")
         _progress(progress, 100, "Restore complete")
         _log(log, f"MariaDB restore verified: {summary}")
         return {
@@ -1130,23 +1236,30 @@ def restore_sqlite(
                 con.executescript(str(item.get("create") or ""))
             con.commit()
 
+            skipped_by_table: dict[str, int] = {}
             total = max(1, len(tables))
             for idx, item in enumerate(tables):
-                _progress(progress, 12 + int((idx / total) * 66), f"Data: {item.get('name') or '?'}")
+                table_name = str(item.get("name") or "?")
+                _progress(progress, 12 + int((idx / total) * 66), f"Data: {table_name}")
                 data_file = str(item.get("data_file") or "")
                 pending = ""
+                skipped = 0
                 with zf.open(data_file, "r") as raw:
                     for raw_line in raw:
                         pending += raw_line.decode("utf-8")
                         if sqlite3.complete_statement(pending):
                             statement = pending.strip()
                             if statement:
-                                con.execute(statement)
+                                skipped += _execute_insert_resilient(
+                                    con.execute, statement, table_name, log
+                                )
                             pending = ""
                 if pending.strip():
                     raise RuntimeError(
-                        f"Incomplete SQL statement in backup table data: {item.get('name') or data_file}"
+                        f"Incomplete SQL statement in backup table data: {table_name}"
                     )
+                if skipped:
+                    skipped_by_table[table_name] = skipped
                 con.commit()
 
         _progress(progress, 80, "Restoring views")
@@ -1167,16 +1280,30 @@ def restore_sqlite(
             raise RuntimeError(f"Schema version after restore is {actual_version}, expected {backup_version}.")
         for item in manifest.get("tables") or []:
             name = str(item.get("name") or "")
-            expected = int(item.get("rows") or 0)
+            original_expected = int(item.get("rows") or 0)
+            skipped = int(skipped_by_table.get(name, 0))
+            expected = original_expected - skipped
             actual = int(con.execute(f"SELECT COUNT(*) FROM {_sqlite_ident(name)}").fetchone()[0])
             if actual != expected:
-                raise RuntimeError(f"Table {name}: {actual} rows after restore, expected {expected}.")
+                raise RuntimeError(
+                    f"Table {name}: {actual} rows after restore, expected {expected} "
+                    f"({skipped} skipped from {original_expected})."
+                )
         integrity = con.execute("PRAGMA integrity_check").fetchone()
         if not integrity or str(integrity[0]).lower() != "ok":
             raise RuntimeError(f"SQLite integrity check failed after restore: {integrity}")
+        skipped_rows = sum(skipped_by_table.values())
+        if skipped_rows:
+            _log(log, f"WARNING: SQLite restore completed with {skipped_rows} skipped row(s).")
         _progress(progress, 100, "Restore complete")
         _log(log, f"SQLite restore verified: {len(tables)} tables")
-        return {"engine": "SQLite", "database": str(manifest.get("source_database") or ""), "schema_version": backup_version, "tables": len(tables)}
+        return {
+            "engine": "SQLite",
+            "database": str(manifest.get("source_database") or ""),
+            "schema_version": backup_version,
+            "tables": len(tables),
+            "skipped_rows": skipped_rows,
+        }
     except Exception:
         try:
             con.close()
