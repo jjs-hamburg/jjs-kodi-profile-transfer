@@ -1412,13 +1412,21 @@ class TransferApp(tk.Tk):
 
         pending = self._operation_pending_message
         if pending is not None:
-            _level, pending_message = pending
-            if pending_message.strip():
+            level, pending_message = pending
+            if (
+                pending_message.strip()
+                and (
+                    (state == "success" and level == "info")
+                    or (state == "error" and level in ("warning", "error"))
+                )
+            ):
                 message = pending_message.strip()
 
         if state == "success" and not message:
-            status_var = self.status_vars.get(error_status_key)
-            status_text = status_var.get().strip() if status_var is not None else ""
+            status_text = ""
+            if error_status_key in ("install", "screenshot", "database"):
+                status_var = self.status_vars.get(error_status_key)
+                status_text = status_var.get().strip() if status_var is not None else ""
             if status_text and status_text != "—" and "in progress" not in status_text.lower():
                 message = status_text
             else:
@@ -1536,9 +1544,9 @@ class TransferApp(tk.Tk):
         self._active_progress_key = progress_key
         self._cancel_event.clear()
         self._cancel_enabled = True
+        self._apply_busy(True)
         self._show_operation_dialog(operation_title)
         self._set_progress(0, "Starting", progress_key)
-        self._ui_queue.put(("busy", True))
         threading.Thread(
             target=self._worker_wrapper,
             args=(fn, error_status_key, progress_key),
