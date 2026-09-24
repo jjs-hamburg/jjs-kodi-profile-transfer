@@ -861,18 +861,28 @@ def _apply_maria_charset(con, db_name: str, info: dict) -> None:
 
 
 def _restore_maria_data(con, zf: zipfile.ZipFile, table_item: dict, log=None) -> int:
+    """Restore one MariaDB table in one transaction; fall back only for bad batches."""
     data_file = str(table_item.get("data_file") or "")
     table_name = str(table_item.get("name") or data_file or "?")
     skipped = 0
-    with zf.open(data_file, "r") as raw:
-        for raw_line in raw:
-            line = raw_line.decode("utf-8").strip()
-            if line:
-                def execute(statement: str) -> None:
-                    with con.cursor() as cur:
-                        cur.execute(statement)
-                skipped += _execute_insert_resilient(execute, line, table_name, log)
-    return skipped
+    try:
+        con.begin()
+        with zf.open(data_file, "r") as raw:
+            for raw_line in raw:
+                line = raw_line.decode("utf-8").strip()
+                if line:
+                    def execute(statement: str) -> None:
+                        with con.cursor() as cur:
+                            cur.execute(statement)
+                    skipped += _execute_insert_resilient(execute, line, table_name, log)
+        con.commit()
+        return skipped
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        raise
 
 
 def _verify_maria(
