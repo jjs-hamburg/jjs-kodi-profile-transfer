@@ -34,6 +34,7 @@ except ImportError:
 BACKUP_FORMAT_VERSION = 2
 DATA_BATCH_ROWS = 250
 DATA_BATCH_MAX_CHARS = 512 * 1024
+RESTORE_MERGE_MAX_CHARS = 8 * 1024 * 1024
 
 MAGIC = {
     "music": "JJS_MUSIC_DB_BACKUP",
@@ -131,35 +132,98 @@ def _split_insert_rows(statement: str) -> tuple[str, list[str]] | None:
     return prefix, rows
 
 
-def _execute_insert_resilient(execute, statement: str, table_name: str, log=None) -> int:
-    """Execute a generated INSERT; on failure retry row-by-row and skip bad rows."""
+def _execute_insert_rows_resilient(execute, prefix: str, rows: list[str], table_name: str, log=None) -> int:
+    """Execute rows in large batches; isolate only genuinely bad rows by binary splitting."""
+    if not rows:
+        return 0
+    statement = prefix + ",".join(rows) + ";"
     try:
         execute(statement)
         return 0
     except Exception as bulk_error:
-        split = _split_insert_rows(statement)
-        if split is None:
-            raise
-        prefix, rows = split
-        _log(
-            log,
-            f"WARNING: bulk insert failed in {table_name}; retrying {len(rows)} row(s) individually: {bulk_error}",
+        if len(rows) == 1:
+            preview = rows[0].replace("\r", " ").replace("\n", " ")
+            if len(preview) > 180:
+                preview = preview[:177] + "..."
+            _log(
+                log,
+                f"WARNING: skipped bad row in {table_name}: {bulk_error} | {preview}",
+            )
+            return 1
+        mid = len(rows) // 2
+        return (
+            _execute_insert_rows_resilient(execute, prefix, rows[:mid], table_name, log)
+            + _execute_insert_rows_resilient(execute, prefix, rows[mid:], table_name, log)
         )
-        skipped = 0
-        for index, row_sql in enumerate(rows, start=1):
-            try:
-                execute(prefix + row_sql + ";")
-            except Exception as row_error:
-                skipped += 1
-                preview = row_sql.replace("\r", " ").replace("\n", " ")
-                if len(preview) > 180:
-                    preview = preview[:177] + "..."
-                _log(
-                    log,
-                    f"WARNING: skipped bad row {index} in {table_name}: {row_error} | {preview}",
-                )
-        return skipped
 
+
+def _execute_insert_resilient(execute, statement: str, table_name: str, log=None) -> int:
+    """Execute one generated INSERT with binary-split fallback on bad rows."""
+    split = _split_insert_rows(statement)
+    if split is None:
+        execute(statement)
+        return 0
+    prefix, rows = split
+    return _execute_insert_rows_resilient(execute, prefix, rows, table_name, log)
+
+
+def _iter_merged_insert_statements(raw, max_chars: int = RESTORE_MERGE_MAX_CHARS):
+    """Merge compatible backup INSERT lines into much larger restore statements."""
+    pending_prefix = None
+    pending_rows: list[str] = []
+    pending_chars = 0
+
+    def flush():
+        nonlocal pending_prefix, pending_rows, pending_chars
+        if not pending_rows or pending_prefix is None:
+            return None
+        statement = pending_prefix + ",".join(pending_rows) + ";"
+        pending_prefix = None
+        pending_rows = []
+        pending_chars = 0
+        return statement
+
+    for raw_line in raw:
+        line = raw_line.decode("utf-8").strip()
+        if not line:
+            continue
+        split = _split_insert_rows(line)
+        if split is None:
+            statement = flush()
+            if statement is not None:
+                yield statement
+            yield line
+            continue
+
+        prefix, rows = split
+        rows_chars = sum(len(row) + 1 for row in rows)
+        if (
+            pending_rows
+            and (
+                prefix != pending_prefix
+                or pending_chars + rows_chars > max_chars
+            )
+        ):
+            statement = flush()
+            if statement is not None:
+                yield statement
+
+        if pending_prefix is None:
+            pending_prefix = prefix
+
+        if rows_chars > max_chars and not pending_rows:
+            yield prefix + ",".join(rows) + ";"
+            pending_prefix = None
+            pending_rows = []
+            pending_chars = 0
+            continue
+
+        pending_rows.extend(rows)
+        pending_chars += rows_chars
+
+    statement = flush()
+    if statement is not None:
+        yield statement
 
 def _safe_backup_part(value: str, fallback: str) -> str:
     text = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or fallback)).strip("._-")
@@ -914,20 +978,21 @@ def _apply_maria_charset(con, db_name: str, info: dict) -> None:
 
 
 def _restore_maria_data(con, zf: zipfile.ZipFile, table_item: dict, log=None) -> int:
-    """Restore one MariaDB table in one transaction; fall back only for bad batches."""
+    """Restore one MariaDB table in one transaction using large merged INSERTs."""
     data_file = str(table_item.get("data_file") or "")
     table_name = str(table_item.get("name") or data_file or "?")
     skipped = 0
     try:
+        with con.cursor() as cur:
+            cur.execute("SET SESSION FOREIGN_KEY_CHECKS=0")
+            cur.execute("SET SESSION UNIQUE_CHECKS=0")
         con.begin()
         with zf.open(data_file, "r") as raw:
-            for raw_line in raw:
-                line = raw_line.decode("utf-8").strip()
-                if line:
-                    def execute(statement: str) -> None:
-                        with con.cursor() as cur:
-                            cur.execute(statement)
-                    skipped += _execute_insert_resilient(execute, line, table_name, log)
+            for statement in _iter_merged_insert_statements(raw):
+                def execute(sql: str) -> None:
+                    with con.cursor() as cur:
+                        cur.execute(sql)
+                skipped += _execute_insert_resilient(execute, statement, table_name, log)
         con.commit()
         return skipped
     except Exception:
@@ -1068,6 +1133,7 @@ def restore_mariadb(
 
         with con.cursor() as cur:
             cur.execute("SET FOREIGN_KEY_CHECKS=1")
+            cur.execute("SET UNIQUE_CHECKS=1")
         _progress(progress, 94, "Verifying restore")
         summary = _verify_maria(con, manifest, restore_schema, skipped_by_table)
         skipped_rows = sum(skipped_by_table.values())
