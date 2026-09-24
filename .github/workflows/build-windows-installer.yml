@@ -45,7 +45,7 @@ jobs:
       - name: Syntax and import check
         shell: pwsh
         run: |
-          python -m py_compile installer/jjs_kodi_toolbox.py
+          python -m py_compile installer/jjs_kodi_toolbox.py installer/jjs_kodi_database.py
           python -c "from pathlib import Path; s=Path(\'installer/jjs_kodi_toolbox.py\').read_text(encoding=\'utf-8\'); assert r\'\\n            command =\' not in s, \'literal escaped newline found\'"
           python -c "import installer.jjs_kodi_toolbox as m; assert m.APP_VERSION == '1.14'; assert m.Image is not None; assert m.kodi_db.pymysql is not None; print(m.APP_TITLE, m.APP_VERSION)"
           python -c "from installer import jjs_kodi_database as d; assert d.BACKUP_FORMAT_VERSION == 2; assert d.MAGIC['music'] == 'JJS_MUSIC_DB_BACKUP'; assert d.MAGIC['video'] == 'JJS_VIDEO_DB_BACKUP'; print('Database backup format OK')"
@@ -80,6 +80,27 @@ jobs:
               con.close()
               assert got == text_value, (got, text_value)
           print("SQLite multiline restore OK")
+          '@ | python -
+          @'
+          import sqlite3
+          from installer import jjs_kodi_database as d
+
+          con = sqlite3.connect(":memory:")
+          con.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, value TEXT)")
+          messages = []
+          skipped = d._execute_insert_resilient(
+              con.execute,
+              "INSERT INTO t VALUES (1,'ok'),(1,'duplicate'),(2,'also ok');",
+              "t",
+              messages.append,
+          )
+          assert skipped == 1, skipped
+          assert con.execute("SELECT id, value FROM t ORDER BY id").fetchall() == [
+              (1, "ok"), (2, "also ok")
+          ]
+          assert any("skipped bad row" in msg for msg in messages)
+          con.close()
+          print("Row-level restore recovery OK")
           '@ | python -
           python -c "from pathlib import Path; s=Path('installer/jjs_kodi_toolbox.py').read_text(encoding='utf-8'); assert 'Transferring restore archive as a file to Android' not in s; assert 'Direct Android profile transfer completed.' in s"
           python -c "import installer.jjs_kodi_toolbox as m; assert m.normalize_windows_unc_path('//MEDIA-NAS/mce/test.tar') == r'\\MEDIA-NAS\mce\test.tar'; assert m.replace_unc_server('//MEDIA-NAS/mce/test.tar', '192.0.2.10') == r'\\192.0.2.10\mce\test.tar'; print('UNC normalization/fallback OK')"
