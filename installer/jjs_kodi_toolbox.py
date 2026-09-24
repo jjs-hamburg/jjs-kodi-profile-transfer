@@ -252,6 +252,15 @@ class TransferApp(tk.Tk):
         self._progress_values: dict[str, float] = {}
         self._active_progress_key: str | None = None
         self._log_widgets: list[tk.Text] = []
+        self._cancel_event = threading.Event()
+        self._cancel_enabled = False
+        self._operation_dialog: tk.Toplevel | None = None
+        self._operation_dialog_title_var: tk.StringVar | None = None
+        self._operation_dialog_progress_var: tk.StringVar | None = None
+        self._operation_dialog_result_var: tk.StringVar | None = None
+        self._operation_dialog_bar: ttk.Progressbar | None = None
+        self._operation_dialog_button: ttk.Button | None = None
+        self._operation_pending_message: tuple[str, str] | None = None
 
         self._load_config()
         self._build_ui()
@@ -400,11 +409,11 @@ class TransferApp(tk.Tk):
         actions.pack(fill="x", pady=10)
 
         for text, fn in (
-            ("Check source", lambda: self._start_worker(lambda: self._check_endpoint("source"))),
-            ("Check target", lambda: self._start_worker(lambda: self._check_endpoint("target"))),
-            ("BACKUP", lambda: self._start_worker(self._backup_only)),
-            ("RESTORE", lambda: self._start_worker(self._restore_only)),
-            ("TRANSFER A → B", lambda: self._start_worker(self._transfer)),
+            ("Check source", lambda: self._start_worker(lambda: self._check_endpoint("source"), operation_title="Check source")),
+            ("Check target", lambda: self._start_worker(lambda: self._check_endpoint("target"), operation_title="Check target")),
+            ("BACKUP", lambda: self._start_worker(self._backup_only, operation_title="Profile backup")),
+            ("RESTORE", lambda: self._start_worker(self._restore_only, operation_title="Profile restore")),
+            ("TRANSFER A → B", lambda: self._start_worker(self._transfer, operation_title="Profile transfer A → B")),
         ):
             b = ttk.Button(actions, text=text, command=fn)
             b.pack(side="left", padx=(0, 8))
@@ -468,7 +477,9 @@ class TransferApp(tk.Tk):
         self.install_check_button = ttk.Button(
             actions,
             text="Check device",
-            command=lambda: self._start_worker(self._check_install_target, "install"),
+            command=lambda: self._start_worker(
+                self._check_install_target, "install", "Check install target"
+            ),
         )
         self.install_check_button.pack(side="left", padx=(0, 8))
         self._action_buttons.append(self.install_check_button)
@@ -476,7 +487,9 @@ class TransferApp(tk.Tk):
         self.install_action_button = ttk.Button(
             actions,
             text="INSTALL / UPDATE",
-            command=lambda: self._start_worker(self._install_or_update, "install"),
+            command=lambda: self._start_worker(
+                self._install_or_update, "install", "Kodi install / update"
+            ),
         )
         self.install_action_button.pack(side="left", padx=(0, 8))
         self._action_buttons.append(self.install_action_button)
@@ -484,7 +497,9 @@ class TransferApp(tk.Tk):
         self.uninstall_button = ttk.Button(
             actions,
             text="UNINSTALL",
-            command=lambda: self._start_worker(self._uninstall_android_kodi, "install"),
+            command=lambda: self._start_worker(
+                self._uninstall_android_kodi, "install", "Uninstall Kodi"
+            ),
         )
         self.uninstall_button.pack(side="left", padx=(0, 8))
         self._action_buttons.append(self.uninstall_button)
@@ -576,6 +591,7 @@ class TransferApp(tk.Tk):
             command=lambda: self._start_worker(
                 lambda: self._check_endpoint("source"),
                 "screenshot",
+                "Check screenshot source",
             ),
         )
         self.screenshot_check_button.pack(side="left", padx=(0, 8))
@@ -584,7 +600,9 @@ class TransferApp(tk.Tk):
         self.screenshot_button = ttk.Button(
             actions,
             text="Take Screenshot",
-            command=lambda: self._start_worker(self._take_screenshot, "screenshot"),
+            command=lambda: self._start_worker(
+                self._take_screenshot, "screenshot", "Take screenshot"
+            ),
         )
         self.screenshot_button.pack(side="left", padx=(0, 8))
         self._action_buttons.append(self.screenshot_button)
@@ -728,7 +746,9 @@ class TransferApp(tk.Tk):
             button = ttk.Button(
                 actions,
                 text=text,
-                command=lambda f=fn: self._start_worker(f, "database"),
+                command=lambda f=fn, title=text: self._start_worker(
+                    f, "database", title.replace("BACKUP", "Backup").replace("RESTORE", "Restore")
+                ),
             )
             button.pack(side="left", padx=(0, 8))
             self._action_buttons.append(button)
@@ -1254,6 +1274,11 @@ class TransferApp(tk.Tk):
                         bar["value"] = value
                     if var is not None:
                         var.set(label)
+                    if self._operation_dialog is not None and self._operation_dialog.winfo_exists():
+                        if self._operation_dialog_bar is not None:
+                            self._operation_dialog_bar["value"] = value
+                        if self._operation_dialog_progress_var is not None:
+                            self._operation_dialog_progress_var.set(label)
                 elif kind == "profiles":
                     role, values, selected_text, done = payload
                     try:
@@ -1275,15 +1300,183 @@ class TransferApp(tk.Tk):
                         done.set()
                 elif kind == "message":
                     level, title, msg = payload
-                    fn = {
-                        "info": messagebox.showinfo,
-                        "warning": messagebox.showwarning,
-                        "error": messagebox.showerror,
-                    }[level]
-                    fn(title, msg, parent=self)
+                    if self._operation_dialog is not None and self._operation_dialog.winfo_exists():
+                        self._operation_pending_message = (level, str(msg))
+                    else:
+                        fn = {
+                            "info": messagebox.showinfo,
+                            "warning": messagebox.showwarning,
+                            "error": messagebox.showerror,
+                        }[level]
+                        fn(title, msg, parent=self)
+                elif kind == "operation_done":
+                    state, message, error_status_key = payload
+                    self._finish_operation_dialog(state, str(message or ""), error_status_key)
         except queue.Empty:
             pass
         self.after(100, self._drain_ui_queue)
+
+    def _center_child_on_main(self, dialog: tk.Toplevel) -> None:
+        self.update_idletasks()
+        dialog.update_idletasks()
+        main_x = self.winfo_rootx()
+        main_y = self.winfo_rooty()
+        main_w = max(self.winfo_width(), self.winfo_reqwidth())
+        main_h = max(self.winfo_height(), self.winfo_reqheight())
+        child_w = max(dialog.winfo_reqwidth(), 480)
+        child_h = max(dialog.winfo_reqheight(), 185)
+        x = main_x + max(0, (main_w - child_w) // 2)
+        y = main_y + max(0, (main_h - child_h) // 2)
+        dialog.geometry(f"{child_w}x{child_h}+{x}+{y}")
+
+    def _show_operation_dialog(self, title: str) -> None:
+        self._close_operation_dialog()
+        self._operation_pending_message = None
+
+        dialog = tk.Toplevel(self)
+        self._operation_dialog = dialog
+        dialog.withdraw()
+        dialog.title(APP_TITLE)
+        dialog.transient(self)
+        dialog.resizable(False, False)
+
+        body = ttk.Frame(dialog, padding=18)
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(0, weight=1)
+
+        self._operation_dialog_title_var = tk.StringVar(value=title)
+        ttk.Label(
+            body,
+            textvariable=self._operation_dialog_title_var,
+            font=("Segoe UI", 11, "bold"),
+        ).grid(row=0, column=0, sticky="w")
+
+        self._operation_dialog_progress_var = tk.StringVar(value="0% – Starting")
+        ttk.Label(
+            body,
+            textvariable=self._operation_dialog_progress_var,
+            anchor="w",
+        ).grid(row=1, column=0, sticky="ew", pady=(12, 4))
+
+        self._operation_dialog_bar = ttk.Progressbar(
+            body, mode="determinate", maximum=100, length=420
+        )
+        self._operation_dialog_bar.grid(row=2, column=0, sticky="ew")
+
+        self._operation_dialog_result_var = tk.StringVar(value="")
+        ttk.Label(
+            body,
+            textvariable=self._operation_dialog_result_var,
+            justify="left",
+            anchor="w",
+            wraplength=440,
+        ).grid(row=3, column=0, sticky="ew", pady=(12, 0))
+
+        button_row = ttk.Frame(body)
+        button_row.grid(row=4, column=0, sticky="e", pady=(14, 0))
+        self._operation_dialog_button = ttk.Button(
+            button_row, text="Cancel", command=self._request_cancel, width=12
+        )
+        self._operation_dialog_button.pack()
+
+        dialog.protocol("WM_DELETE_WINDOW", self._request_cancel)
+        self._center_child_on_main(dialog)
+        dialog.deiconify()
+        dialog.lift()
+        dialog.grab_set()
+
+    def _request_cancel(self) -> None:
+        if not self._busy:
+            self._close_operation_dialog()
+            return
+        if self._cancel_event.is_set():
+            return
+        self._cancel_event.set()
+        if self._operation_dialog_progress_var is not None:
+            current = self._operation_dialog_progress_var.get()
+            percent = current.split("%", 1)[0] + "%" if "%" in current else ""
+            self._operation_dialog_progress_var.set(
+                (percent + " – Cancelling…").strip(" –")
+            )
+        if self._operation_dialog_button is not None:
+            self._operation_dialog_button.configure(state="disabled", text="Cancelling…")
+
+    def _check_cancelled(self) -> None:
+        if self._cancel_enabled and self._cancel_event.is_set():
+            raise TransferError("Operation cancelled by user.")
+
+    def _finish_operation_dialog(self, state: str, message: str, error_status_key: str) -> None:
+        dialog = self._operation_dialog
+        if dialog is None or not dialog.winfo_exists():
+            return
+
+        pending = self._operation_pending_message
+        if pending is not None:
+            _level, pending_message = pending
+            if pending_message.strip():
+                message = pending_message.strip()
+
+        if state == "success" and not message:
+            status_var = self.status_vars.get(error_status_key)
+            status_text = status_var.get().strip() if status_var is not None else ""
+            if status_text and status_text != "—" and "in progress" not in status_text.lower():
+                message = status_text
+            else:
+                message = "Operation completed successfully."
+        elif state == "cancelled" and not message:
+            message = "Operation cancelled."
+        elif state == "error" and not message:
+            message = "Operation failed."
+
+        if self._operation_dialog_title_var is not None:
+            suffix = {
+                "success": " – Complete",
+                "cancelled": " – Cancelled",
+                "error": " – Error",
+            }.get(state, "")
+            base = self._operation_dialog_title_var.get().split(" – ", 1)[0]
+            self._operation_dialog_title_var.set(base + suffix)
+
+        if self._operation_dialog_result_var is not None:
+            self._operation_dialog_result_var.set(message)
+        if self._operation_dialog_progress_var is not None:
+            if state == "success":
+                self._operation_dialog_progress_var.set("100% – Complete")
+                if self._operation_dialog_bar is not None:
+                    self._operation_dialog_bar["value"] = 100
+            elif state == "cancelled":
+                current = float(self._operation_dialog_bar["value"]) if self._operation_dialog_bar is not None else 0
+                self._operation_dialog_progress_var.set(f"{int(round(current))}% – Cancelled")
+            else:
+                current = float(self._operation_dialog_bar["value"]) if self._operation_dialog_bar is not None else 0
+                self._operation_dialog_progress_var.set(f"{int(round(current))}% – Error")
+
+        if self._operation_dialog_button is not None:
+            self._operation_dialog_button.configure(
+                text="OK", state="normal", command=self._close_operation_dialog
+            )
+        dialog.protocol("WM_DELETE_WINDOW", self._close_operation_dialog)
+        self._center_child_on_main(dialog)
+        self._operation_pending_message = None
+
+    def _close_operation_dialog(self) -> None:
+        dialog = self._operation_dialog
+        self._operation_dialog = None
+        self._operation_dialog_title_var = None
+        self._operation_dialog_progress_var = None
+        self._operation_dialog_result_var = None
+        self._operation_dialog_bar = None
+        self._operation_dialog_button = None
+        self._operation_pending_message = None
+        if dialog is not None:
+            try:
+                dialog.grab_release()
+            except Exception:
+                pass
+            try:
+                dialog.destroy()
+            except Exception:
+                pass
 
     def _set_progress(
         self,
@@ -1291,6 +1484,8 @@ class TransferApp(tk.Tk):
         text: str = "",
         key: str | None = None,
     ) -> None:
+        if threading.current_thread() is not threading.main_thread():
+            self._check_cancelled()
         progress_key = key or self._active_progress_key
         if not progress_key:
             return
@@ -1324,7 +1519,12 @@ class TransferApp(tk.Tk):
         if not busy:
             self._refresh_install_controls()
 
-    def _start_worker(self, fn, error_status_key: str = "result") -> None:
+    def _start_worker(
+        self,
+        fn,
+        error_status_key: str = "result",
+        operation_title: str = "Operation",
+    ) -> None:
         if self._busy:
             return
         self._save_config()
@@ -1334,6 +1534,9 @@ class TransferApp(tk.Tk):
             "database": "database",
         }.get(error_status_key, "profile")
         self._active_progress_key = progress_key
+        self._cancel_event.clear()
+        self._cancel_enabled = True
+        self._show_operation_dialog(operation_title)
         self._set_progress(0, "Starting", progress_key)
         self._ui_queue.put(("busy", True))
         threading.Thread(
@@ -1343,30 +1546,49 @@ class TransferApp(tk.Tk):
         ).start()
 
     def _worker_wrapper(self, fn, error_status_key: str, progress_key: str) -> None:
-        succeeded = False
+        state = "error"
+        result_message = ""
         try:
             self._prepare_log_file()
+            self._check_cancelled()
             fn()
-            succeeded = True
+            self._check_cancelled()
+            state = "success"
         except TransferError as e:
-            self.log(f"ERROR: {e}")
+            text = str(e)
+            cancelled = "cancel" in text.lower() or self._cancel_event.is_set()
+            state = "cancelled" if cancelled else "error"
+            result_message = "Operation cancelled." if cancelled else text
+            self.log(("CANCELLED: " if cancelled else "ERROR: ") + text)
             if error_status_key in self.status_vars:
-                self._set_status(error_status_key, f"ERROR: {e}")
-            label = "Cancelled" if "cancel" in str(e).lower() else "Error"
-            self._set_progress(self._progress_values.get(progress_key, 0.0), label, progress_key)
-            self._ui_queue.put(("message", ("error", APP_TITLE, str(e))))
+                self._set_status(
+                    error_status_key,
+                    "Cancelled" if cancelled else f"ERROR: {text}",
+                )
         except Exception as e:
+            state = "error"
+            result_message = f"Unexpected error:\n\n{type(e).__name__}: {e}"
             self.log(f"UNEXPECTED ERROR: {type(e).__name__}: {e}")
             if error_status_key in self.status_vars:
                 self._set_status(error_status_key, f"ERROR: {type(e).__name__}: {e}")
-            self._set_progress(self._progress_values.get(progress_key, 0.0), "Error", progress_key)
-            self._ui_queue.put(
-                ("message", ("error", APP_TITLE, f"Unexpected error:\n\n{type(e).__name__}: {e}"))
-            )
         finally:
-            if succeeded:
+            self._cancel_enabled = False
+            if state == "success":
                 self._set_progress(100, "Complete", progress_key)
+            elif state == "cancelled":
+                self._set_progress(
+                    self._progress_values.get(progress_key, 0.0),
+                    "Cancelled",
+                    progress_key,
+                )
+            else:
+                self._set_progress(
+                    self._progress_values.get(progress_key, 0.0),
+                    "Error",
+                    progress_key,
+                )
             self._active_progress_key = None
+            self._ui_queue.put(("operation_done", (state, result_message, error_status_key)))
             self._ui_queue.put(("busy", False))
 
     def _prepare_log_file(self) -> None:
@@ -1382,7 +1604,12 @@ class TransferApp(tk.Tk):
 
         def ask() -> None:
             try:
-                answer["value"] = bool(messagebox.askyesno(title, message, parent=self))
+                parent = (
+                    self._operation_dialog
+                    if self._operation_dialog is not None and self._operation_dialog.winfo_exists()
+                    else self
+                )
+                answer["value"] = bool(messagebox.askyesno(title, message, parent=parent))
             finally:
                 done.set()
 
@@ -2341,8 +2568,13 @@ class TransferApp(tk.Tk):
                 self.log(f"{label} restore completed and verified.")
         finally:
             if stopped and info is not None:
-                self._set_progress(97, "Restarting Kodi")
-                self._database_start_kodi(info)
+                cancel_enabled = self._cancel_enabled
+                self._cancel_enabled = False
+                try:
+                    self._set_progress(97, "Restarting Kodi")
+                    self._database_start_kodi(info)
+                finally:
+                    self._cancel_enabled = cancel_enabled
 
     # ---------- endpoint discovery ----------
     def _profile_display(self, profile: dict) -> str:
@@ -4147,7 +4379,8 @@ class TransferApp(tk.Tk):
 
     def _on_close(self) -> None:
         if self._busy:
-            if not messagebox.askyesno(APP_TITLE, "An operation is currently running. Close the window anyway?", parent=self):
+            if self._operation_dialog is not None and self._operation_dialog.winfo_exists():
+                self._operation_dialog.lift()
                 return
         self._save_config()
         self.destroy()
