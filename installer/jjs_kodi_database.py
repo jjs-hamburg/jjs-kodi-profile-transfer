@@ -1133,11 +1133,20 @@ def restore_sqlite(
             total = max(1, len(tables))
             for idx, item in enumerate(tables):
                 _progress(progress, 12 + int((idx / total) * 66), f"Data: {item.get('name') or '?'}")
-                with zf.open(str(item.get("data_file") or ""), "r") as raw:
+                data_file = str(item.get("data_file") or "")
+                pending = ""
+                with zf.open(data_file, "r") as raw:
                     for raw_line in raw:
-                        line = raw_line.decode("utf-8").strip()
-                        if line:
-                            con.execute(line)
+                        pending += raw_line.decode("utf-8")
+                        if sqlite3.complete_statement(pending):
+                            statement = pending.strip()
+                            if statement:
+                                con.execute(statement)
+                            pending = ""
+                if pending.strip():
+                    raise RuntimeError(
+                        f"Incomplete SQL statement in backup table data: {item.get('name') or data_file}"
+                    )
                 con.commit()
 
         _progress(progress, 80, "Restoring views")
