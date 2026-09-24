@@ -400,6 +400,16 @@ def _restore_target_mariadb(cfg: dict, kind: str, backup_version: int) -> tuple[
 
     return target, not exists
 
+def resolve_mariadb_restore_target(cfg: dict, kind: str, backup_version: int) -> dict:
+    """Describe the MariaDB target for restore without requiring an intact Kodi schema."""
+    db_name, needs_create = _restore_target_mariadb(cfg, kind, backup_version)
+    return {
+        "database": db_name,
+        "schema_version": int(backup_version),
+        "needs_create": bool(needs_create),
+    }
+
+
 def _database_charset(con, db_name: str) -> dict:
     with con.cursor() as cur:
         cur.execute(
