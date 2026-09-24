@@ -2352,17 +2352,30 @@ class TransferApp(tk.Tk):
         info, source_text = self._database_source()
         self._set_status("database_source", source_text)
         self.log(f"Database source: {source_text}")
+
+        failures = []
         for idx, kind in enumerate(("music", "video")):
-            self._set_progress(25 + idx * 32, f"Checking {kind.title()}DB")
+            label = "MusicDB" if kind == "music" else "VideoDB"
+            self._set_progress(25 + idx * 32, f"Checking {label}")
             try:
                 db = self._database_describe(info, kind)
                 self._set_status(f"{kind}_db", db["text"])
-                self.log(f"{kind.title()}DB: {db['text']}")
+                self.log(f"{label}: {db['text']}")
             except Exception as exc:
-                self._set_status(f"{kind}_db", f"Not available: {exc}")
-                self.log(f"{kind.title()}DB: not available – {exc}")
+                reason = str(exc)
+                if "using password: NO" in reason:
+                    reason = "MariaDB password is missing"
+                elif "Access denied for user" in reason:
+                    reason = "MariaDB login failed: " + reason
+                self._set_status(f"{kind}_db", f"Not available: {reason}")
+                self.log(f"{label}: not available – {reason}")
+                failures.append(f"{label}: {reason}")
+
         self._set_progress(95, "Database check complete")
-        self._set_status("database", "Check complete")
+        if failures:
+            self._set_status("database", " | ".join(failures))
+        else:
+            self._set_status("database", "MusicDB and VideoDB reachable")
 
     def _database_backup(self, kind: str) -> None:
         label = "MusicDB" if kind == "music" else "VideoDB"
