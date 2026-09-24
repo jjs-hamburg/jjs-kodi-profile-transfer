@@ -358,66 +358,47 @@ def discover_mariadb(cfg: dict, kind: str) -> tuple[str, int]:
 
 
 def _restore_target_mariadb(cfg: dict, kind: str, backup_version: int) -> tuple[str, bool]:
-    """Resolve a restore target even when the Kodi DB is missing or incomplete.
-
-    Returns (database_name, needs_create). An intact current Kodi DB is preferred
-    and still enforces the existing schema-version safety check in restore_mariadb().
-    If discovery fails because no usable Kodi schema remains, the target name is
-    reconstructed from the configured Kodi prefix plus the backup schema version.
-    """
+    """Resolve a restore target even when the Kodi DB is missing or incomplete."""
     prefix = str(cfg.get("prefix") or PREFIX[kind]).strip() or PREFIX[kind]
+
     try:
-        db_name, current_version = discover_mariadb(cfg, kind)
-        if int(current_version) != int(backup_version):
-            raise RuntimeError(
-                f"Backup schema {backup_version} does not match current schema {current_version}."
-            )
-        return db_name, False
-    except RuntimeError as discovery_error:
-        # Disaster-recovery path: discovery requires a readable version table.
-        # A killed/aborted restore may have left the database empty or partial.
-        suffix = str(int(backup_version))
-        target = prefix if prefix.casefold().endswith(suffix.casefold()) else prefix + suffix
+        discovered_db, _discovered_version = discover_mariadb(cfg, kind)
+    except Exception:
+        discovered_db = ""
 
-        con = _connect_maria(cfg)
+    if discovered_db:
         try:
-            with con.cursor() as cur:
-                cur.execute(
-                    "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME=%s",
-                    (target,),
+            db_con = _connect_maria(cfg, discovered_db)
+            try:
+                current_version = _schema_version_maria(db_con)
+            finally:
+                db_con.close()
+        except Exception:
+            # Existing database is incomplete/corrupt (for example after an
+            # interrupted restore). Treat it as a disaster-recovery target.
+            discovered_db = ""
+        else:
+            if int(current_version) != int(backup_version):
+                raise RuntimeError(
+                    f"Backup schema {backup_version} does not match current schema {current_version}."
                 )
-                exists = cur.fetchone() is not None
-        finally:
-            con.close()
+            return discovered_db, False
 
-        _log(
-            None,
-            f"MariaDB discovery unavailable for restore ({discovery_error}); "
-            f"using backup-derived target {target}.",
-        )
-        return target, not exists
+    suffix = str(int(backup_version))
+    target = prefix if prefix.casefold().endswith(suffix.casefold()) else prefix + suffix
 
-
-def _ensure_maria_database(cfg: dict, db_name: str, charset_info: dict) -> None:
-    """Create a missing MariaDB restore target using the backup charset."""
-    charset = _safe_charset(charset_info.get("charset"), "utf8mb4")
-    collation = _safe_charset(charset_info.get("collation"), "")
-    con = _connect_maria(cfg, maintenance=True)
+    con = _connect_maria(cfg)
     try:
         with con.cursor() as cur:
-            if collation:
-                cur.execute(
-                    f"CREATE DATABASE IF NOT EXISTS {_safe_ident(db_name)} "
-                    f"CHARACTER SET {charset} COLLATE {collation}"
-                )
-            else:
-                cur.execute(
-                    f"CREATE DATABASE IF NOT EXISTS {_safe_ident(db_name)} "
-                    f"CHARACTER SET {charset}"
-                )
+            cur.execute(
+                "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME=%s",
+                (target,),
+            )
+            exists = cur.fetchone() is not None
     finally:
         con.close()
 
+    return target, not exists
 
 def _database_charset(con, db_name: str) -> dict:
     with con.cursor() as cur:
