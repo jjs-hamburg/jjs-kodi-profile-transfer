@@ -2325,11 +2325,20 @@ class TransferApp(tk.Tk):
                     self._set_progress(82, "Installing restored SQLite DB")
                     self._database_upload_sqlite(info, restored_db, context["remote_path"])
 
+            skipped_rows = int(result.get("skipped_rows") or 0)
+            suffix = f" | WARNING: {skipped_rows} row(s) skipped" if skipped_rows else ""
             self._set_status(
                 "database",
-                f"Restore complete: {result['engine']} | {context['database']} | schema {result['schema_version']}",
+                f"Restore complete: {result['engine']} | {context['database']} | "
+                f"schema {result['schema_version']}{suffix}",
             )
-            self.log(f"{label} restore completed and verified.")
+            if skipped_rows:
+                self.log(
+                    f"WARNING: {label} restore completed with {skipped_rows} skipped row(s); "
+                    "all remaining data and database structure were verified."
+                )
+            else:
+                self.log(f"{label} restore completed and verified.")
         finally:
             if stopped and info is not None:
                 self._set_progress(97, "Restarting Kodi")
