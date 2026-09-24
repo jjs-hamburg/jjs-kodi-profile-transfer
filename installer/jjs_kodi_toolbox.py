@@ -50,9 +50,14 @@ try:
 except ImportError:
     Image = None
 
+try:
+    from . import jjs_kodi_database as kodi_db
+except ImportError:
+    import jjs_kodi_database as kodi_db
+
 
 APP_TITLE = "JJS KODI Toolbox"
-APP_VERSION = "1.13"
+APP_VERSION = "1.15"
 META_NAME = "JJS_PROFILE_TRANSFER.json"
 
 DEFAULT_ADB_PORT = 5555
@@ -97,6 +102,11 @@ def default_backup_dir() -> Path:
 def default_screenshot_dir() -> Path:
     pictures = Path.home() / "Pictures"
     return pictures / "Kodi-Screenshots"
+
+
+def default_database_backup_dir() -> Path:
+    docs = Path.home() / "Documents"
+    return docs / "Kodi-Database-Backups"
 
 
 def normalize_windows_unc_path(value: str) -> str:
@@ -239,9 +249,23 @@ class TransferApp(tk.Tk):
         self._action_buttons: list[ttk.Button] = []
         self._progress_bars: dict[str, ttk.Progressbar] = {}
         self._progress_vars: dict[str, tk.StringVar] = {}
-        self._progress_values: dict[str, float] = {}
+        self._progress_values: dict[str, float] = {
+            "profile": 0.0,
+            "install": 0.0,
+            "screenshot": 0.0,
+            "database": 0.0,
+        }
         self._active_progress_key: str | None = None
         self._log_widgets: list[tk.Text] = []
+        self._cancel_event = threading.Event()
+        self._cancel_enabled = False
+        self._operation_dialog: tk.Toplevel | None = None
+        self._operation_dialog_title_var: tk.StringVar | None = None
+        self._operation_dialog_progress_var: tk.StringVar | None = None
+        self._operation_dialog_result_var: tk.StringVar | None = None
+        self._operation_dialog_bar: ttk.Progressbar | None = None
+        self._operation_dialog_button: ttk.Button | None = None
+        self._operation_pending_message: tuple[str, str] | None = None
 
         self._load_config()
         self._build_ui()
@@ -262,6 +286,14 @@ class TransferApp(tk.Tk):
             "backup_file": self.backup_file_var.get().strip(),
             "safety_backup": bool(self.safety_backup_var.get()),
             "screenshot_dir": self.screenshot_dir_var.get().strip(),
+            "database_backup_dir": self.database_backup_dir_var.get().strip(),
+            "database_restore_file": self.database_restore_file_var.get().strip(),
+            "database_source_mode": self.database_source_mode_var.get().strip(),
+            "database_host": self.database_host_var.get().strip(),
+            "database_port": self.database_port_var.get().strip(),
+            "database_user": self.database_user_var.get().strip(),
+            "database_music_prefix": self.database_music_prefix_var.get().strip(),
+            "database_video_prefix": self.database_video_prefix_var.get().strip(),
             "install_file": self.install_file_var.get().strip(),
             "uninstall_backup": bool(self.uninstall_backup_var.get()),
         }
@@ -289,7 +321,7 @@ class TransferApp(tk.Tk):
         ttk.Label(outer, text=APP_TITLE, font=("Segoe UI", 16, "bold")).pack(anchor="w")
         ttk.Label(
             outer,
-            text="Manage Kodi profiles, install or update Kodi, and capture screenshots on Android/ADB and LibreELEC/SSH.",
+            text="Manage Kodi profiles, databases, installs/updates, and screenshots on Android/ADB and LibreELEC/SSH.",
         ).pack(anchor="w", pady=(2, 10))
 
         self.adb_dir_var = tk.StringVar(value=str(self._cfg.get("adb_dir", DEFAULT_ADB_DIR)))
@@ -298,6 +330,25 @@ class TransferApp(tk.Tk):
         self.safety_backup_var = tk.BooleanVar(value=bool(self._cfg.get("safety_backup", True)))
         self.screenshot_dir_var = tk.StringVar(
             value=str(self._cfg.get("screenshot_dir", default_screenshot_dir()))
+        )
+        self.database_backup_dir_var = tk.StringVar(
+            value=str(self._cfg.get("database_backup_dir", default_database_backup_dir()))
+        )
+        self.database_restore_file_var = tk.StringVar(
+            value=str(self._cfg.get("database_restore_file", ""))
+        )
+        self.database_source_mode_var = tk.StringVar(
+            value=str(self._cfg.get("database_source_mode", "Kodi source"))
+        )
+        self.database_host_var = tk.StringVar(value=str(self._cfg.get("database_host", "")))
+        self.database_port_var = tk.StringVar(value=str(self._cfg.get("database_port", "3306")))
+        self.database_user_var = tk.StringVar(value=str(self._cfg.get("database_user", "")))
+        self.database_password_var = tk.StringVar(value="")
+        self.database_music_prefix_var = tk.StringVar(
+            value=str(self._cfg.get("database_music_prefix", "MyMusic"))
+        )
+        self.database_video_prefix_var = tk.StringVar(
+            value=str(self._cfg.get("database_video_prefix", "MyVideos"))
         )
         self.install_file_var = tk.StringVar(value=str(self._cfg.get("install_file", "")))
         self.uninstall_backup_var = tk.BooleanVar(value=bool(self._cfg.get("uninstall_backup", True)))
@@ -326,13 +377,16 @@ class TransferApp(tk.Tk):
         profile_tab = ttk.Frame(notebook, padding=10)
         install_tab = ttk.Frame(notebook, padding=10)
         screenshot_tab = ttk.Frame(notebook, padding=10)
+        database_tab = ttk.Frame(notebook, padding=10)
         notebook.add(profile_tab, text="Profile Backup / Restore / Transfer")
         notebook.add(install_tab, text="Kodi Install / Update")
         notebook.add(screenshot_tab, text="Screenshots")
+        notebook.add(database_tab, text="Databases")
 
         self._build_profile_tab(profile_tab)
         self._build_install_tab(install_tab)
         self._build_screenshot_tab(screenshot_tab)
+        self._build_database_tab(database_tab)
 
     def _build_profile_tab(self, outer) -> None:
         endpoints = ttk.Frame(outer)
@@ -360,27 +414,15 @@ class TransferApp(tk.Tk):
         actions.pack(fill="x", pady=10)
 
         for text, fn in (
-            ("Check source", lambda: self._start_worker(lambda: self._check_endpoint("source"))),
-            ("Check target", lambda: self._start_worker(lambda: self._check_endpoint("target"))),
-            ("BACKUP", lambda: self._start_worker(self._backup_only)),
-            ("RESTORE", lambda: self._start_worker(self._restore_only)),
-            ("TRANSFER A → B", lambda: self._start_worker(self._transfer)),
+            ("Check source", lambda: self._start_worker(lambda: self._check_endpoint("source"), operation_title="Check source")),
+            ("Check target", lambda: self._start_worker(lambda: self._check_endpoint("target"), operation_title="Check target")),
+            ("BACKUP", lambda: self._start_worker(self._backup_only, operation_title="Profile backup")),
+            ("RESTORE", lambda: self._start_worker(self._restore_only, operation_title="Profile restore")),
+            ("TRANSFER A → B", lambda: self._start_worker(self._transfer, operation_title="Profile transfer A → B")),
         ):
             b = ttk.Button(actions, text=text, command=fn)
             b.pack(side="left", padx=(0, 8))
             self._action_buttons.append(b)
-
-        self.profile_progress = ttk.Progressbar(
-            actions, mode="determinate", maximum=100, length=220
-        )
-        self.profile_progress.pack(side="right")
-        self.profile_progress_var = tk.StringVar(value="Ready")
-        ttk.Label(actions, textvariable=self.profile_progress_var, width=24, anchor="e").pack(
-            side="right", padx=(0, 8)
-        )
-        self._progress_bars["profile"] = self.profile_progress
-        self._progress_vars["profile"] = self.profile_progress_var
-        self._progress_values["profile"] = 0.0
 
         status = ttk.LabelFrame(outer, text="Status", padding=8)
         status.pack(fill="x", pady=(0, 10))
@@ -428,7 +470,9 @@ class TransferApp(tk.Tk):
         self.install_check_button = ttk.Button(
             actions,
             text="Check device",
-            command=lambda: self._start_worker(self._check_install_target, "install"),
+            command=lambda: self._start_worker(
+                self._check_install_target, "install", "Check install target"
+            ),
         )
         self.install_check_button.pack(side="left", padx=(0, 8))
         self._action_buttons.append(self.install_check_button)
@@ -436,7 +480,9 @@ class TransferApp(tk.Tk):
         self.install_action_button = ttk.Button(
             actions,
             text="INSTALL / UPDATE",
-            command=lambda: self._start_worker(self._install_or_update, "install"),
+            command=lambda: self._start_worker(
+                self._install_or_update, "install", "Kodi install / update"
+            ),
         )
         self.install_action_button.pack(side="left", padx=(0, 8))
         self._action_buttons.append(self.install_action_button)
@@ -444,22 +490,12 @@ class TransferApp(tk.Tk):
         self.uninstall_button = ttk.Button(
             actions,
             text="UNINSTALL",
-            command=lambda: self._start_worker(self._uninstall_android_kodi, "install"),
+            command=lambda: self._start_worker(
+                self._uninstall_android_kodi, "install", "Uninstall Kodi"
+            ),
         )
         self.uninstall_button.pack(side="left", padx=(0, 8))
         self._action_buttons.append(self.uninstall_button)
-
-        self.install_progress = ttk.Progressbar(
-            actions, mode="determinate", maximum=100, length=220
-        )
-        self.install_progress.pack(side="right")
-        self.install_progress_var = tk.StringVar(value="Ready")
-        ttk.Label(actions, textvariable=self.install_progress_var, width=24, anchor="e").pack(
-            side="right", padx=(0, 8)
-        )
-        self._progress_bars["install"] = self.install_progress
-        self._progress_vars["install"] = self.install_progress_var
-        self._progress_values["install"] = 0.0
 
         self.uninstall_backup_check = ttk.Checkbutton(
             outer,
@@ -536,6 +572,7 @@ class TransferApp(tk.Tk):
             command=lambda: self._start_worker(
                 lambda: self._check_endpoint("source"),
                 "screenshot",
+                "Check screenshot source",
             ),
         )
         self.screenshot_check_button.pack(side="left", padx=(0, 8))
@@ -544,22 +581,12 @@ class TransferApp(tk.Tk):
         self.screenshot_button = ttk.Button(
             actions,
             text="Take Screenshot",
-            command=lambda: self._start_worker(self._take_screenshot, "screenshot"),
+            command=lambda: self._start_worker(
+                self._take_screenshot, "screenshot", "Take screenshot"
+            ),
         )
         self.screenshot_button.pack(side="left", padx=(0, 8))
         self._action_buttons.append(self.screenshot_button)
-
-        self.screenshot_progress = ttk.Progressbar(
-            actions, mode="determinate", maximum=100, length=220
-        )
-        self.screenshot_progress.pack(side="right")
-        self.screenshot_progress_var = tk.StringVar(value="Ready")
-        ttk.Label(actions, textvariable=self.screenshot_progress_var, width=24, anchor="e").pack(
-            side="right", padx=(0, 8)
-        )
-        self._progress_bars["screenshot"] = self.screenshot_progress
-        self._progress_vars["screenshot"] = self.screenshot_progress_var
-        self._progress_values["screenshot"] = 0.0
 
         status = ttk.LabelFrame(outer, text="Status", padding=8)
         status.pack(fill="x", pady=(0, 10))
@@ -642,6 +669,204 @@ class TransferApp(tk.Tk):
 
     def _refresh_screenshot_connection_rows(self) -> None:
         widgets = self._endpoint_widgets.get("screenshot")
+        if not widgets:
+            return
+        is_android = str(self._endpoint_vars["source"]["type"].get()).startswith("Android")
+        for widget in widgets["ssh_rows"]:
+            if is_android:
+                widget.grid_remove()
+            else:
+                widget.grid()
+
+    def _build_database_tab(self, outer) -> None:
+        ttk.Label(
+            outer,
+            text="Back up or restore MusicDB / VideoDB from Source A or connect directly to a MariaDB server.",
+        ).pack(anchor="w", pady=(0, 10))
+
+        connection = ttk.LabelFrame(outer, text="Database source", padding=10)
+        connection.pack(fill="x")
+        connection.columnconfigure(1, weight=1)
+        self._build_database_endpoint(connection)
+
+        files = ttk.LabelFrame(outer, text="Database backup files", padding=10)
+        files.pack(fill="x", pady=(10, 0))
+        files.columnconfigure(1, weight=1)
+        self._path_row(
+            files, 0, "Backup destination:", self.database_backup_dir_var, self._browse_database_backup_dir
+        )
+        self._path_row(
+            files, 1, "Backup to restore:", self.database_restore_file_var, self._browse_database_restore_file
+        )
+        ttk.Label(
+            files,
+            text="Uses the JJS Music Library Manager backup format (ZIP format version 2).",
+        ).grid(row=2, column=1, sticky="w", pady=(2, 0))
+
+        actions = ttk.Frame(outer)
+        actions.pack(fill="x", pady=10)
+        for text, fn in (
+            ("Check DBs", self._check_databases),
+            ("BACKUP MusicDB", lambda: self._database_backup("music")),
+            ("RESTORE MusicDB", lambda: self._database_restore("music")),
+            ("BACKUP VideoDB", lambda: self._database_backup("video")),
+            ("RESTORE VideoDB", lambda: self._database_restore("video")),
+        ):
+            button = ttk.Button(
+                actions,
+                text=text,
+                command=lambda f=fn, title=text: self._start_worker(
+                    f, "database", title.replace("BACKUP", "Backup").replace("RESTORE", "Restore")
+                ),
+            )
+            button.pack(side="left", padx=(0, 8))
+            self._action_buttons.append(button)
+
+        status = ttk.LabelFrame(outer, text="Status", padding=8)
+        status.pack(fill="x", pady=(0, 10))
+        status.columnconfigure(1, weight=1)
+        for row, (key, label) in enumerate(
+            (
+                ("database_source", "Source"),
+                ("music_db", "MusicDB"),
+                ("video_db", "VideoDB"),
+                ("database", "Operation"),
+            )
+        ):
+            ttk.Label(status, text=label + ":").grid(
+                row=row, column=0, sticky="nw", padx=(0, 10), pady=2
+            )
+            var = tk.StringVar(value="—")
+            self.status_vars[key] = var
+            ttk.Label(status, textvariable=var).grid(row=row, column=1, sticky="w", pady=2)
+
+        log_box = ttk.LabelFrame(outer, text="Log", padding=6)
+        log_box.pack(fill="both", expand=True)
+        self.database_log_text = tk.Text(
+            log_box, wrap="word", height=14, font=("Consolas", 9), state="disabled"
+        )
+        scroll = ttk.Scrollbar(log_box, orient="vertical", command=self.database_log_text.yview)
+        self.database_log_text.configure(yscrollcommand=scroll.set)
+        self.database_log_text.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        self._log_widgets.append(self.database_log_text)
+
+    def _build_database_endpoint(self, frame) -> None:
+        ttk.Label(frame, text="Mode:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
+        mode_box = ttk.Combobox(
+            frame,
+            textvariable=self.database_source_mode_var,
+            values=("Kodi source", "MariaDB server"),
+            state="readonly",
+            width=20,
+        )
+        mode_box.grid(row=0, column=1, sticky="w", pady=3)
+        mode_box.bind("<<ComboboxSelected>>", lambda _e: self._database_mode_changed())
+
+        kodi_frame = ttk.Frame(frame)
+        kodi_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        kodi_frame.columnconfigure(1, weight=1)
+
+        source_vars = self._endpoint_vars["source"]
+        type_var = source_vars["type"]
+        ip_var = source_vars["ip"]
+        port_var = source_vars["port"]
+        user_var = source_vars["user"]
+        password_var = source_vars["password"]
+        profile_var = source_vars["profile"]
+
+        ttk.Label(kodi_frame, text="Connection:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
+        type_box = ttk.Combobox(
+            kodi_frame,
+            textvariable=type_var,
+            values=("Android (ADB)", "LibreELEC (SSH)"),
+            state="readonly",
+            width=18,
+        )
+        type_box.grid(row=0, column=1, sticky="ew", pady=3)
+        type_box.bind("<<ComboboxSelected>>", lambda _e: self._endpoint_type_changed("source"))
+
+        ttk.Label(kodi_frame, text="IP:").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=3)
+        iprow = ttk.Frame(kodi_frame)
+        iprow.grid(row=1, column=1, sticky="ew", pady=3)
+        iprow.columnconfigure(0, weight=1)
+        ttk.Entry(iprow, textvariable=ip_var).grid(row=0, column=0, sticky="ew")
+        ttk.Label(iprow, text="Port:").grid(row=0, column=1, padx=(8, 4))
+        ttk.Entry(iprow, textvariable=port_var, width=7).grid(row=0, column=2)
+
+        user_label = ttk.Label(kodi_frame, text="SSH-User:")
+        user_label.grid(row=2, column=0, sticky="w", padx=(0, 8), pady=3)
+        user_entry = ttk.Entry(kodi_frame, textvariable=user_var)
+        user_entry.grid(row=2, column=1, sticky="ew", pady=3)
+
+        pass_label = ttk.Label(kodi_frame, text="SSH password:")
+        pass_label.grid(row=3, column=0, sticky="w", padx=(0, 8), pady=3)
+        pass_entry = ttk.Entry(kodi_frame, textvariable=password_var, show="●")
+        pass_entry.grid(row=3, column=1, sticky="ew", pady=3)
+
+        ttk.Label(kodi_frame, text="Kodi:").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=3)
+        profile_box = ttk.Combobox(kodi_frame, textvariable=profile_var)
+        profile_box.grid(row=4, column=1, sticky="ew", pady=3)
+
+        server_frame = ttk.Frame(frame)
+        server_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        server_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(server_frame, text="Server:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
+        hostrow = ttk.Frame(server_frame)
+        hostrow.grid(row=0, column=1, sticky="ew", pady=3)
+        hostrow.columnconfigure(0, weight=1)
+        ttk.Entry(hostrow, textvariable=self.database_host_var).grid(row=0, column=0, sticky="ew")
+        ttk.Label(hostrow, text="Port:").grid(row=0, column=1, padx=(8, 4))
+        ttk.Entry(hostrow, textvariable=self.database_port_var, width=7).grid(row=0, column=2)
+
+        ttk.Label(server_frame, text="User:").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(server_frame, textvariable=self.database_user_var).grid(row=1, column=1, sticky="ew", pady=3)
+
+        ttk.Label(server_frame, text="Password:").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(server_frame, textvariable=self.database_password_var, show="●").grid(
+            row=2, column=1, sticky="ew", pady=3
+        )
+
+        ttk.Label(server_frame, text="Music prefix:").grid(row=3, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(server_frame, textvariable=self.database_music_prefix_var).grid(
+            row=3, column=1, sticky="ew", pady=3
+        )
+
+        ttk.Label(server_frame, text="Video prefix:").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(server_frame, textvariable=self.database_video_prefix_var).grid(
+            row=4, column=1, sticky="ew", pady=3
+        )
+
+        ttk.Label(
+            server_frame,
+            text="Server, port, user and prefixes are saved. The MariaDB password is not stored.",
+        ).grid(row=5, column=1, sticky="w", pady=(2, 0))
+
+        self._endpoint_widgets["database"] = {
+            "profile": profile_box,
+            "ssh_rows": (user_label, user_entry, pass_label, pass_entry),
+            "kodi_frame": kodi_frame,
+            "server_frame": server_frame,
+        }
+        self._refresh_database_connection_rows()
+        self._database_mode_changed()
+
+    def _database_mode_changed(self) -> None:
+        widgets = self._endpoint_widgets.get("database")
+        if not widgets:
+            return
+        direct = self.database_source_mode_var.get().strip() == "MariaDB server"
+        if direct:
+            widgets["kodi_frame"].grid_remove()
+            widgets["server_frame"].grid()
+        else:
+            widgets["server_frame"].grid_remove()
+            widgets["kodi_frame"].grid()
+            self._refresh_database_connection_rows()
+
+    def _refresh_database_connection_rows(self) -> None:
+        widgets = self._endpoint_widgets.get("database")
         if not widgets:
             return
         is_android = str(self._endpoint_vars["source"]["type"].get()).startswith("Android")
@@ -764,7 +989,7 @@ class TransferApp(tk.Tk):
             )
         if hasattr(self, "uninstall_button"):
             if is_android:
-                self.uninstall_button.pack(side="left", padx=(0, 8), before=self.install_progress)
+                self.uninstall_button.pack(side="left", padx=(0, 8))
                 self.uninstall_backup_check.pack(
                     anchor="w",
                     pady=(0, 8),
@@ -879,6 +1104,8 @@ class TransferApp(tk.Tk):
             self._endpoint_widgets[role]["profile"].configure(values=())
             if role == "source" and "screenshot" in self._endpoint_widgets:
                 self._endpoint_widgets["screenshot"]["profile"].configure(values=())
+            if role == "source" and "database" in self._endpoint_widgets:
+                self._endpoint_widgets["database"]["profile"].configure(values=())
             if role == "target" and "install" in self._endpoint_widgets:
                 self._endpoint_widgets["install"]["profile"].configure(values=())
 
@@ -896,6 +1123,7 @@ class TransferApp(tk.Tk):
             self._install_type_changed(initial=initial)
         if role == "source":
             self._refresh_screenshot_connection_rows()
+            self._refresh_database_connection_rows()
 
     def _path_row(self, parent, row: int, label: str, variable: tk.StringVar, command) -> None:
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=3)
@@ -933,6 +1161,22 @@ class TransferApp(tk.Tk):
         p = filedialog.askdirectory(initialdir=initial)
         if p:
             self.screenshot_dir_var.set(p)
+
+    def _browse_database_backup_dir(self) -> None:
+        initial = self.database_backup_dir_var.get() or str(default_database_backup_dir())
+        p = filedialog.askdirectory(initialdir=initial)
+        if p:
+            self.database_backup_dir_var.set(p)
+
+    def _browse_database_restore_file(self) -> None:
+        initial = self.database_backup_dir_var.get() or str(default_database_backup_dir())
+        p = filedialog.askopenfilename(
+            title="Select JJS database backup",
+            initialdir=initial,
+            filetypes=[("JJS database backup", "*.zip"), ("All files", "*.*")],
+        )
+        if p:
+            self.database_restore_file_var.set(p)
 
     def _browse_install_file(self) -> None:
         is_android = str(self._endpoint_vars["install"]["type"].get()).startswith("Android")
@@ -987,12 +1231,19 @@ class TransferApp(tk.Tk):
                         bar["value"] = value
                     if var is not None:
                         var.set(label)
+                    if self._operation_dialog is not None and self._operation_dialog.winfo_exists():
+                        if self._operation_dialog_bar is not None:
+                            self._operation_dialog_bar["value"] = value
+                        if self._operation_dialog_progress_var is not None:
+                            self._operation_dialog_progress_var.set(label)
                 elif kind == "profiles":
                     role, values, selected_text, done = payload
                     try:
                         self._endpoint_widgets[role]["profile"].configure(values=values)
                         if role == "source" and "screenshot" in self._endpoint_widgets:
                             self._endpoint_widgets["screenshot"]["profile"].configure(values=values)
+                        if role == "source" and "database" in self._endpoint_widgets:
+                            self._endpoint_widgets["database"]["profile"].configure(values=values)
                         self._endpoint_vars[role]["profile"].set(selected_text)
                     finally:
                         done.set()
@@ -1006,15 +1257,191 @@ class TransferApp(tk.Tk):
                         done.set()
                 elif kind == "message":
                     level, title, msg = payload
-                    fn = {
-                        "info": messagebox.showinfo,
-                        "warning": messagebox.showwarning,
-                        "error": messagebox.showerror,
-                    }[level]
-                    fn(title, msg, parent=self)
+                    if self._operation_dialog is not None and self._operation_dialog.winfo_exists():
+                        self._operation_pending_message = (level, str(msg))
+                    else:
+                        fn = {
+                            "info": messagebox.showinfo,
+                            "warning": messagebox.showwarning,
+                            "error": messagebox.showerror,
+                        }[level]
+                        fn(title, msg, parent=self)
+                elif kind == "operation_done":
+                    state, message, error_status_key = payload
+                    self._finish_operation_dialog(state, str(message or ""), error_status_key)
         except queue.Empty:
             pass
         self.after(100, self._drain_ui_queue)
+
+    def _center_child_on_main(self, dialog: tk.Toplevel) -> None:
+        self.update_idletasks()
+        dialog.update_idletasks()
+        main_x = self.winfo_rootx()
+        main_y = self.winfo_rooty()
+        main_w = max(self.winfo_width(), self.winfo_reqwidth())
+        main_h = max(self.winfo_height(), self.winfo_reqheight())
+        child_w = max(dialog.winfo_reqwidth(), 480)
+        child_h = max(dialog.winfo_reqheight(), 185)
+        x = main_x + max(0, (main_w - child_w) // 2)
+        y = main_y + max(0, (main_h - child_h) // 2)
+        dialog.geometry(f"{child_w}x{child_h}+{x}+{y}")
+
+    def _show_operation_dialog(self, title: str) -> None:
+        self._close_operation_dialog()
+        self._operation_pending_message = None
+
+        dialog = tk.Toplevel(self)
+        self._operation_dialog = dialog
+        dialog.withdraw()
+        dialog.title(APP_TITLE)
+        dialog.transient(self)
+        dialog.resizable(False, False)
+
+        body = ttk.Frame(dialog, padding=18)
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(0, weight=1)
+
+        self._operation_dialog_title_var = tk.StringVar(value=title)
+        ttk.Label(
+            body,
+            textvariable=self._operation_dialog_title_var,
+            font=("Segoe UI", 11, "bold"),
+        ).grid(row=0, column=0, sticky="w")
+
+        self._operation_dialog_progress_var = tk.StringVar(value="0% – Starting")
+        ttk.Label(
+            body,
+            textvariable=self._operation_dialog_progress_var,
+            anchor="w",
+        ).grid(row=1, column=0, sticky="ew", pady=(12, 4))
+
+        self._operation_dialog_bar = ttk.Progressbar(
+            body, mode="determinate", maximum=100, length=420
+        )
+        self._operation_dialog_bar.grid(row=2, column=0, sticky="ew")
+
+        self._operation_dialog_result_var = tk.StringVar(value="")
+        ttk.Label(
+            body,
+            textvariable=self._operation_dialog_result_var,
+            justify="left",
+            anchor="w",
+            wraplength=440,
+        ).grid(row=3, column=0, sticky="ew", pady=(12, 0))
+
+        button_row = ttk.Frame(body)
+        button_row.grid(row=4, column=0, sticky="e", pady=(14, 0))
+        self._operation_dialog_button = ttk.Button(
+            button_row, text="Cancel", command=self._request_cancel, width=12
+        )
+        self._operation_dialog_button.pack()
+
+        dialog.protocol("WM_DELETE_WINDOW", self._request_cancel)
+        self._center_child_on_main(dialog)
+        dialog.deiconify()
+        dialog.lift()
+        dialog.grab_set()
+
+    def _request_cancel(self) -> None:
+        if not self._busy:
+            self._close_operation_dialog()
+            return
+        if self._cancel_event.is_set():
+            return
+        self._cancel_event.set()
+        if self._operation_dialog_progress_var is not None:
+            current = self._operation_dialog_progress_var.get()
+            percent = current.split("%", 1)[0] + "%" if "%" in current else ""
+            self._operation_dialog_progress_var.set(
+                (percent + " – Cancelling…").strip(" –")
+            )
+        if self._operation_dialog_button is not None:
+            self._operation_dialog_button.configure(state="disabled", text="Cancelling…")
+
+    def _check_cancelled(self) -> None:
+        if self._cancel_enabled and self._cancel_event.is_set():
+            raise TransferError("Operation cancelled by user.")
+
+    def _finish_operation_dialog(self, state: str, message: str, error_status_key: str) -> None:
+        dialog = self._operation_dialog
+        if dialog is None or not dialog.winfo_exists():
+            return
+
+        pending = self._operation_pending_message
+        if pending is not None:
+            level, pending_message = pending
+            if (
+                pending_message.strip()
+                and (
+                    (state == "success" and level == "info")
+                    or (state == "error" and level in ("warning", "error"))
+                )
+            ):
+                message = pending_message.strip()
+
+        if state == "success" and not message:
+            status_text = ""
+            if error_status_key in ("install", "screenshot", "database"):
+                status_var = self.status_vars.get(error_status_key)
+                status_text = status_var.get().strip() if status_var is not None else ""
+            if status_text and status_text != "—" and "in progress" not in status_text.lower():
+                message = status_text
+            else:
+                message = "Operation completed successfully."
+        elif state == "cancelled" and not message:
+            message = "Operation cancelled."
+        elif state == "error" and not message:
+            message = "Operation failed."
+
+        if self._operation_dialog_title_var is not None:
+            suffix = {
+                "success": " – Complete",
+                "cancelled": " – Cancelled",
+                "error": " – Error",
+            }.get(state, "")
+            base = self._operation_dialog_title_var.get().split(" – ", 1)[0]
+            self._operation_dialog_title_var.set(base + suffix)
+
+        if self._operation_dialog_result_var is not None:
+            self._operation_dialog_result_var.set(message)
+        if self._operation_dialog_progress_var is not None:
+            if state == "success":
+                self._operation_dialog_progress_var.set("100% – Complete")
+                if self._operation_dialog_bar is not None:
+                    self._operation_dialog_bar["value"] = 100
+            elif state == "cancelled":
+                current = float(self._operation_dialog_bar["value"]) if self._operation_dialog_bar is not None else 0
+                self._operation_dialog_progress_var.set(f"{int(round(current))}% – Cancelled")
+            else:
+                current = float(self._operation_dialog_bar["value"]) if self._operation_dialog_bar is not None else 0
+                self._operation_dialog_progress_var.set(f"{int(round(current))}% – Error")
+
+        if self._operation_dialog_button is not None:
+            self._operation_dialog_button.configure(
+                text="OK", state="normal", command=self._close_operation_dialog
+            )
+        dialog.protocol("WM_DELETE_WINDOW", self._close_operation_dialog)
+        self._center_child_on_main(dialog)
+        self._operation_pending_message = None
+
+    def _close_operation_dialog(self) -> None:
+        dialog = self._operation_dialog
+        self._operation_dialog = None
+        self._operation_dialog_title_var = None
+        self._operation_dialog_progress_var = None
+        self._operation_dialog_result_var = None
+        self._operation_dialog_bar = None
+        self._operation_dialog_button = None
+        self._operation_pending_message = None
+        if dialog is not None:
+            try:
+                dialog.grab_release()
+            except Exception:
+                pass
+            try:
+                dialog.destroy()
+            except Exception:
+                pass
 
     def _set_progress(
         self,
@@ -1022,6 +1449,8 @@ class TransferApp(tk.Tk):
         text: str = "",
         key: str | None = None,
     ) -> None:
+        if threading.current_thread() is not threading.main_thread():
+            self._check_cancelled()
         progress_key = key or self._active_progress_key
         if not progress_key:
             return
@@ -1055,17 +1484,26 @@ class TransferApp(tk.Tk):
         if not busy:
             self._refresh_install_controls()
 
-    def _start_worker(self, fn, error_status_key: str = "result") -> None:
+    def _start_worker(
+        self,
+        fn,
+        error_status_key: str = "result",
+        operation_title: str = "Operation",
+    ) -> None:
         if self._busy:
             return
         self._save_config()
         progress_key = {
             "install": "install",
             "screenshot": "screenshot",
+            "database": "database",
         }.get(error_status_key, "profile")
         self._active_progress_key = progress_key
+        self._cancel_event.clear()
+        self._cancel_enabled = True
+        self._apply_busy(True)
+        self._show_operation_dialog(operation_title)
         self._set_progress(0, "Starting", progress_key)
-        self._ui_queue.put(("busy", True))
         threading.Thread(
             target=self._worker_wrapper,
             args=(fn, error_status_key, progress_key),
@@ -1073,30 +1511,49 @@ class TransferApp(tk.Tk):
         ).start()
 
     def _worker_wrapper(self, fn, error_status_key: str, progress_key: str) -> None:
-        succeeded = False
+        state = "error"
+        result_message = ""
         try:
             self._prepare_log_file()
+            self._check_cancelled()
             fn()
-            succeeded = True
+            self._check_cancelled()
+            state = "success"
         except TransferError as e:
-            self.log(f"ERROR: {e}")
+            text = str(e)
+            cancelled = "cancel" in text.lower() or self._cancel_event.is_set()
+            state = "cancelled" if cancelled else "error"
+            result_message = "Operation cancelled." if cancelled else text
+            self.log(("CANCELLED: " if cancelled else "ERROR: ") + text)
             if error_status_key in self.status_vars:
-                self._set_status(error_status_key, f"ERROR: {e}")
-            label = "Cancelled" if "cancel" in str(e).lower() else "Error"
-            self._set_progress(self._progress_values.get(progress_key, 0.0), label, progress_key)
-            self._ui_queue.put(("message", ("error", APP_TITLE, str(e))))
+                self._set_status(
+                    error_status_key,
+                    "Cancelled" if cancelled else f"ERROR: {text}",
+                )
         except Exception as e:
+            state = "error"
+            result_message = f"Unexpected error:\n\n{type(e).__name__}: {e}"
             self.log(f"UNEXPECTED ERROR: {type(e).__name__}: {e}")
             if error_status_key in self.status_vars:
                 self._set_status(error_status_key, f"ERROR: {type(e).__name__}: {e}")
-            self._set_progress(self._progress_values.get(progress_key, 0.0), "Error", progress_key)
-            self._ui_queue.put(
-                ("message", ("error", APP_TITLE, f"Unexpected error:\n\n{type(e).__name__}: {e}"))
-            )
         finally:
-            if succeeded:
+            self._cancel_enabled = False
+            if state == "success":
                 self._set_progress(100, "Complete", progress_key)
+            elif state == "cancelled":
+                self._set_progress(
+                    self._progress_values.get(progress_key, 0.0),
+                    "Cancelled",
+                    progress_key,
+                )
+            else:
+                self._set_progress(
+                    self._progress_values.get(progress_key, 0.0),
+                    "Error",
+                    progress_key,
+                )
             self._active_progress_key = None
+            self._ui_queue.put(("operation_done", (state, result_message, error_status_key)))
             self._ui_queue.put(("busy", False))
 
     def _prepare_log_file(self) -> None:
@@ -1112,7 +1569,12 @@ class TransferApp(tk.Tk):
 
         def ask() -> None:
             try:
-                answer["value"] = bool(messagebox.askyesno(title, message, parent=self))
+                parent = (
+                    self._operation_dialog
+                    if self._operation_dialog is not None and self._operation_dialog.winfo_exists()
+                    else self
+                )
+                answer["value"] = bool(messagebox.askyesno(title, message, parent=parent))
             finally:
                 done.set()
 
@@ -1602,6 +2064,485 @@ class TransferApp(tk.Tk):
         self.log(f"Screenshot saved locally: {destination} ({size_kib:.0f} KiB)")
         self._set_status("screenshot", f"Saved: {destination}")
 
+    # ---------- database backup / restore ----------
+    def _database_remote_path(self, info: dict, relative: str) -> str:
+        return str(PurePosixPath(info["profile_root"]) / PurePosixPath(relative))
+
+    def _database_read_remote_bytes(self, info: dict, remote_path: str) -> bytes | None:
+        if info["platform"] == "android":
+            cp = self._run_binary(
+                [str(self._find_or_install_adb()), "-s", info["serial"], "exec-out", "cat", remote_path],
+                timeout=30,
+            )
+            if cp.returncode != 0:
+                return None
+            return bytes(cp.stdout or b"")
+
+        client = self._ssh_client("source")
+        sftp = None
+        try:
+            sftp = client.open_sftp()
+            try:
+                with sftp.open(remote_path, "rb") as handle:
+                    return bytes(handle.read())
+            except OSError:
+                return None
+        finally:
+            if sftp is not None:
+                sftp.close()
+            client.close()
+
+    def _database_list_sqlite_files(self, info: dict) -> list[str]:
+        database_dir = self._database_remote_path(info, "userdata/Database")
+        if info["platform"] == "android":
+            command = f"ls -1 {shlex.quote(database_dir)}/*.db 2>/dev/null"
+            cp = self._adb(info["serial"], "shell", command, timeout=30)
+            if cp.returncode != 0 and not (cp.stdout or "").strip():
+                return []
+            return [
+                PurePosixPath(line.strip()).name
+                for line in (cp.stdout or "").splitlines()
+                if line.strip().lower().endswith(".db")
+            ]
+
+        client = self._ssh_client("source")
+        sftp = None
+        try:
+            sftp = client.open_sftp()
+            try:
+                return [name for name in sftp.listdir(database_dir) if str(name).lower().endswith(".db")]
+            except OSError:
+                return []
+        finally:
+            if sftp is not None:
+                sftp.close()
+            client.close()
+
+    def _database_download_remote(self, info: dict, remote_path: str, local_path: Path) -> None:
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        if info["platform"] == "android":
+            cp = self._run(
+                [str(self._find_or_install_adb()), "-s", info["serial"], "pull", remote_path, str(local_path)],
+                timeout=180,
+            )
+            if cp.returncode != 0 or not local_path.is_file():
+                raise TransferError(f"Could not download SQLite database: {remote_path}")
+            return
+
+        client = self._ssh_client("source")
+        sftp = None
+        try:
+            sftp = client.open_sftp()
+            try:
+                size = int(sftp.stat(remote_path).st_size)
+            except OSError as exc:
+                raise TransferError(f"SQLite database does not exist: {remote_path}") from exc
+
+            def callback(done, total):
+                self._set_progress_fraction(12, 35, int(done), int(total or size), "Downloading SQLite DB")
+
+            sftp.get(remote_path, str(local_path), callback=callback)
+        finally:
+            if sftp is not None:
+                sftp.close()
+            client.close()
+
+    def _database_upload_sqlite(self, info: dict, local_path: Path, remote_path: str) -> None:
+        remote_tmp = remote_path + ".jjs-toolbox-new"
+        wal = remote_path + "-wal"
+        shm = remote_path + "-shm"
+        if info["platform"] == "android":
+            cp = self._run(
+                [str(self._find_or_install_adb()), "-s", info["serial"], "push", str(local_path), remote_tmp],
+                timeout=180,
+            )
+            if cp.returncode != 0:
+                raise TransferError("Could not upload restored SQLite database.")
+            command = (
+                f"rm -f {shlex.quote(wal)} {shlex.quote(shm)} && "
+                f"mv -f {shlex.quote(remote_tmp)} {shlex.quote(remote_path)}"
+            )
+            cp = self._adb(info["serial"], "shell", command, timeout=60)
+            if cp.returncode != 0:
+                self._adb(info["serial"], "shell", f"rm -f {shlex.quote(remote_tmp)}", timeout=20)
+                raise TransferError("Could not replace the active SQLite database.")
+            return
+
+        client = self._ssh_client("source")
+        sftp = None
+        try:
+            sftp = client.open_sftp()
+
+            def callback(done, total):
+                self._set_progress_fraction(82, 94, int(done), int(total), "Uploading restored SQLite DB")
+
+            sftp.put(str(local_path), remote_tmp, callback=callback)
+            for sidecar in (wal, shm):
+                try:
+                    sftp.remove(sidecar)
+                except OSError:
+                    pass
+            try:
+                sftp.remove(remote_path)
+            except OSError:
+                pass
+            sftp.rename(remote_tmp, remote_path)
+        except Exception:
+            if sftp is not None:
+                try:
+                    sftp.remove(remote_tmp)
+                except OSError:
+                    pass
+            raise
+        finally:
+            if sftp is not None:
+                sftp.close()
+            client.close()
+
+    def _database_stop_kodi(self, info: dict) -> None:
+        if info["platform"] == "android":
+            cp = self._adb(
+                info["serial"], "shell", "am", "force-stop", info["identifier"], timeout=30
+            )
+            if cp.returncode != 0:
+                raise TransferError(f"Could not stop {info['identifier']} before database operation.")
+            self.log(f"Kodi stopped: {info['identifier']}")
+            return
+
+        client = self._ssh_client("source")
+        try:
+            code, _out, err = self._ssh_exec(client, "systemctl stop kodi", timeout=60)
+            if code != 0:
+                raise TransferError(f"Could not stop Kodi on LibreELEC.{(' ' + err) if err else ''}")
+            self.log("Kodi stopped on LibreELEC.")
+        finally:
+            client.close()
+
+    def _database_start_kodi(self, info: dict) -> None:
+        if info["platform"] == "android":
+            cp = self._adb(
+                info["serial"],
+                "shell",
+                "monkey",
+                "-p",
+                info["identifier"],
+                "-c",
+                "android.intent.category.LAUNCHER",
+                "1",
+                timeout=30,
+            )
+            if cp.returncode == 0:
+                self.log(f"Kodi restarted: {info['identifier']}")
+            else:
+                self.log(
+                    f"NOTE: {info['identifier']} could not be relaunched automatically; start Kodi manually."
+                )
+            return
+
+        client = self._ssh_client("source")
+        try:
+            code, _out, err = self._ssh_exec(client, "systemctl start kodi", timeout=60)
+            if code != 0:
+                raise TransferError(f"Could not restart Kodi on LibreELEC.{(' ' + err) if err else ''}")
+            self.log("Kodi restarted on LibreELEC.")
+        finally:
+            client.close()
+
+    def _direct_database_config(self, kind: str) -> dict:
+        host = self.database_host_var.get().strip()
+        user = self.database_user_var.get().strip()
+        password = self.database_password_var.get()
+        prefix = (
+            self.database_music_prefix_var.get().strip()
+            if kind == "music"
+            else self.database_video_prefix_var.get().strip()
+        )
+        if not host:
+            raise TransferError("MariaDB server is missing.")
+        if not user:
+            raise TransferError("MariaDB user is missing.")
+        if not prefix:
+            raise TransferError(f"{kind.title()}DB prefix is missing.")
+        try:
+            port = int(self.database_port_var.get().strip() or "3306")
+            if not (1 <= port <= 65535):
+                raise ValueError
+        except ValueError as exc:
+            raise TransferError("MariaDB port is invalid.") from exc
+        return {
+            "engine": "mariadb",
+            "config": {
+                "host": host,
+                "port": port,
+                "user": user,
+                "password": password,
+                "prefix": prefix,
+                "timeout": 5,
+                "ssl_ca": "",
+                "ssl_cert": "",
+                "ssl_key": "",
+            },
+        }
+
+    def _database_source(self) -> tuple[dict | None, str]:
+        if self.database_source_mode_var.get().strip() == "MariaDB server":
+            host = self.database_host_var.get().strip() or "?"
+            port = self.database_port_var.get().strip() or "3306"
+            return None, f"MariaDB server | {host}:{port}"
+        info = self._inspect_endpoint("source")
+        return info, f"{info['device']} | {info['name']} | {info['identifier']}"
+
+    def _database_config(self, info: dict | None, kind: str) -> dict:
+        if self.database_source_mode_var.get().strip() == "MariaDB server":
+            return self._direct_database_config(kind)
+        if info is None:
+            raise TransferError("Kodi source is not available.")
+
+        advanced = self._database_remote_path(info, "userdata/advancedsettings.xml")
+        raw = self._database_read_remote_bytes(info, advanced)
+        if raw:
+            try:
+                xml_text = raw.decode("utf-8-sig", errors="replace")
+                cfg = kodi_db.parse_advancedsettings(xml_text, kind)
+            except Exception as exc:
+                raise TransferError(f"Could not parse advancedsettings.xml: {exc}") from exc
+            if cfg is not None:
+                return {"engine": "mariadb", "config": cfg}
+
+        names = self._database_list_sqlite_files(info)
+        try:
+            filename = kodi_db.discover_sqlite_filename(names, kind)
+        except Exception as exc:
+            raise TransferError(str(exc)) from exc
+        return {
+            "engine": "sqlite",
+            "filename": filename,
+            "remote_path": self._database_remote_path(info, f"userdata/Database/{filename}"),
+        }
+
+    def _database_describe(self, info: dict | None, kind: str) -> dict:
+        context = self._database_config(info, kind)
+        if context["engine"] == "mariadb":
+            try:
+                db_name, version = kodi_db.discover_mariadb(context["config"], kind)
+            except Exception as exc:
+                raise TransferError(f"{kind.title()}DB MariaDB discovery failed: {exc}") from exc
+            return {
+                **context,
+                "database": db_name,
+                "schema_version": version,
+                "text": (
+                    f"MariaDB | {context['config']['host']}:{context['config']['port']} | "
+                    f"{db_name} | schema {version}"
+                ),
+            }
+
+        filename = context["filename"]
+        match = re.search(r"(\d+)\.db$", filename, flags=re.IGNORECASE)
+        suffix = match.group(1) if match else "?"
+        return {
+            **context,
+            "database": Path(filename).stem,
+            "schema_version": int(suffix) if suffix.isdigit() else -1,
+            "text": f"SQLite | {filename}",
+        }
+
+    def _check_databases(self) -> None:
+        self._set_progress(5, "Checking source")
+        info, source_text = self._database_source()
+        self._set_status("database_source", source_text)
+        self.log(f"Database source: {source_text}")
+        for idx, kind in enumerate(("music", "video")):
+            self._set_progress(25 + idx * 32, f"Checking {kind.title()}DB")
+            try:
+                db = self._database_describe(info, kind)
+                self._set_status(f"{kind}_db", db["text"])
+                self.log(f"{kind.title()}DB: {db['text']}")
+            except Exception as exc:
+                self._set_status(f"{kind}_db", f"Not available: {exc}")
+                self.log(f"{kind.title()}DB: not available – {exc}")
+        self._set_progress(95, "Database check complete")
+        self._set_status("database", "Check complete")
+
+    def _database_backup(self, kind: str) -> None:
+        label = "MusicDB" if kind == "music" else "VideoDB"
+        self._set_progress(3, "Checking source")
+        info, source_text = self._database_source()
+        self._set_status("database_source", source_text)
+        context = self._database_describe(info, kind)
+        self._set_status(f"{kind}_db", context["text"])
+
+        destination = Path(
+            normalize_windows_unc_path(
+                self.database_backup_dir_var.get().strip() or str(default_database_backup_dir())
+            )
+        )
+        try:
+            destination.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            raise TransferError(f"Database backup folder could not be created: {destination}: {exc}") from exc
+
+        self._set_status("database", f"Backing up {label} …")
+        self.log(f"{label} backup: {context['text']}")
+        if context["engine"] == "mariadb":
+            try:
+                result = kodi_db.backup_mariadb(
+                    kind,
+                    context["config"],
+                    destination,
+                    kodi_version=(info or {}).get("version", ""),
+                    source_id=str(context["config"].get("host") or ""),
+                    progress=lambda value, text: self._set_progress(value, text),
+                    log=self.log,
+                )
+            except Exception as exc:
+                raise TransferError(f"{label} backup failed: {exc}") from exc
+        else:
+            if info is None:
+                raise TransferError("SQLite backup requires a Kodi source device.")
+            stopped = False
+            try:
+                self._set_progress(8, "Stopping Kodi for SQLite snapshot")
+                self._database_stop_kodi(info)
+                stopped = True
+                with tempfile.TemporaryDirectory(prefix=f"jjs-{kind}db-") as td:
+                    local_db = Path(td) / context["filename"]
+                    self._database_download_remote(info, context["remote_path"], local_db)
+                    try:
+                        result = kodi_db.backup_sqlite(
+                            kind,
+                            local_db,
+                            context["filename"],
+                            destination,
+                            kodi_version=info.get("version", ""),
+                            source_id=str(info.get("ip") or ""),
+                            progress=lambda value, text: self._set_progress(35 + value * 0.62, text),
+                            log=self.log,
+                        )
+                    except Exception as exc:
+                        raise TransferError(f"{label} backup failed: {exc}") from exc
+            finally:
+                if stopped:
+                    self._database_start_kodi(info)
+
+        self.database_restore_file_var.set(str(result["path"]))
+        self._set_status(
+            "database",
+            f"Backup complete: {result['engine']} | {result['database']} | schema {result['schema_version']}",
+        )
+        self.log(f"{label} backup written: {result['path']}")
+
+    def _database_restore(self, kind: str) -> None:
+        label = "MusicDB" if kind == "music" else "VideoDB"
+        source = Path(normalize_windows_unc_path(self.database_restore_file_var.get().strip()))
+        if not source.is_file():
+            raise TransferError("Select an existing JJS database backup ZIP first.")
+
+        try:
+            manifest, _schema = kodi_db.validate_backup(source, kind)
+        except Exception as exc:
+            raise TransferError(f"Backup validation failed: {exc}") from exc
+
+        self._set_progress(4, "Checking target database")
+        info, source_text = self._database_source()
+        self._set_status("database_source", source_text)
+        context = self._database_describe(info, kind)
+        self._set_status(f"{kind}_db", context["text"])
+        backup_engine = kodi_db.backup_engine(manifest)
+        if backup_engine != context["engine"]:
+            raise TransferError(
+                f"Backup uses {backup_engine.upper()}, but the active {label} uses {context['engine'].upper()}."
+            )
+
+        backup_db = str(manifest.get("source_database") or "?")
+        backup_version = int(manifest.get("schema_version") or -1)
+        if info is None:
+            runtime_note = (
+                "No Kodi instance is controlled in direct-server mode.\n"
+                "Make sure NO Kodi instance is using this MariaDB during the restore."
+            )
+        else:
+            runtime_note = (
+                "Kodi on this device will be stopped during the restore.\n"
+                "Other Kodi instances must not use the same MariaDB during restore."
+            )
+        if not self._ask_yes_no(
+            f"Restore {label}",
+            f"The active {label} will be completely replaced.\n\n"
+            f"Backup: {backup_db} | {backup_engine.upper()} | schema {backup_version}\n"
+            f"Target: {context['database']} | {context['engine'].upper()}\n\n"
+            f"{runtime_note}\n\n"
+            "Continue?",
+        ):
+            raise TransferError("Database restore cancelled.")
+
+        self._set_status("database", f"Restoring {label} …")
+        stopped = False
+        try:
+            if info is not None:
+                self._set_progress(8, "Stopping Kodi")
+                self._database_stop_kodi(info)
+                stopped = True
+
+            if context["engine"] == "mariadb":
+                try:
+                    result = kodi_db.restore_mariadb(
+                        kind,
+                        context["config"],
+                        source,
+                        progress=lambda value, text: self._set_progress(
+                            (10 + value * 0.85) if info is not None else value,
+                            text,
+                        ),
+                        log=self.log,
+                    )
+                except Exception as exc:
+                    raise TransferError(f"{label} restore failed: {exc}") from exc
+            else:
+                if info is None:
+                    raise TransferError("SQLite restore requires a Kodi source device.")
+                with tempfile.TemporaryDirectory(prefix=f"jjs-{kind}db-restore-") as td:
+                    current_db = Path(td) / ("current-" + context["filename"])
+                    restored_db = Path(td) / ("restored-" + context["filename"])
+                    self._database_download_remote(info, context["remote_path"], current_db)
+                    try:
+                        result = kodi_db.restore_sqlite(
+                            kind,
+                            source,
+                            current_db,
+                            restored_db,
+                            progress=lambda value, text: self._set_progress(35 + value * 0.45, text),
+                            log=self.log,
+                        )
+                    except Exception as exc:
+                        raise TransferError(f"{label} restore failed: {exc}") from exc
+                    self._set_progress(82, "Installing restored SQLite DB")
+                    self._database_upload_sqlite(info, restored_db, context["remote_path"])
+
+            skipped_rows = int(result.get("skipped_rows") or 0)
+            suffix = f" | WARNING: {skipped_rows} row(s) skipped" if skipped_rows else ""
+            self._set_status(
+                "database",
+                f"Restore complete: {result['engine']} | {context['database']} | "
+                f"schema {result['schema_version']}{suffix}",
+            )
+            if skipped_rows:
+                self.log(
+                    f"WARNING: {label} restore completed with {skipped_rows} skipped row(s); "
+                    "all remaining data and database structure were verified."
+                )
+            else:
+                self.log(f"{label} restore completed and verified.")
+        finally:
+            if stopped and info is not None:
+                cancel_enabled = self._cancel_enabled
+                self._cancel_enabled = False
+                try:
+                    self._set_progress(97, "Restarting Kodi")
+                    self._database_start_kodi(info)
+                finally:
+                    self._cancel_enabled = cancel_enabled
+
     # ---------- endpoint discovery ----------
     def _profile_display(self, profile: dict) -> str:
         version = profile.get("version", "").strip()
@@ -1631,6 +2572,8 @@ class TransferApp(tk.Tk):
             self._endpoint_widgets[role]["profile"].configure(values=values)
             if role == "source" and "screenshot" in self._endpoint_widgets:
                 self._endpoint_widgets["screenshot"]["profile"].configure(values=values)
+            if role == "source" and "database" in self._endpoint_widgets:
+                self._endpoint_widgets["database"]["profile"].configure(values=values)
             self._endpoint_vars[role]["profile"].set(selected_text)
         else:
             done = threading.Event()
@@ -3403,7 +4346,8 @@ class TransferApp(tk.Tk):
 
     def _on_close(self) -> None:
         if self._busy:
-            if not messagebox.askyesno(APP_TITLE, "An operation is currently running. Close the window anyway?", parent=self):
+            if self._operation_dialog is not None and self._operation_dialog.winfo_exists():
+                self._operation_dialog.lift()
                 return
         self._save_config()
         self.destroy()
