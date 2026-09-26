@@ -486,7 +486,7 @@ class TransferApp(tk.Tk):
 
         self.rollback_create_button = ttk.Button(
             actions,
-            text="Rollback erstellen",
+            text="Create rollback",
             command=lambda: self._start_worker(
                 self._create_libreelec_rollback, "install", "LibreELEC rollback erstellen"
             ),
@@ -496,9 +496,9 @@ class TransferApp(tk.Tk):
 
         self.rollback_restore_button = ttk.Button(
             actions,
-            text="Rollback zurückspielen",
+            text="Restore rollback",
             command=lambda: self._start_worker(
-                self._restore_libreelec_rollback, "install", "LibreELEC rollback zurückspielen"
+                self._restore_libreelec_rollback, "install", "Restore LibreELEC rollback"
             ),
         )
         self.rollback_restore_button.pack(side="left", padx=(0, 8))
@@ -506,9 +506,9 @@ class TransferApp(tk.Tk):
 
         self.network_tar_button = ttk.Button(
             actions,
-            text="TAR laden",
+            text="Download TAR",
             command=lambda: self._start_worker(
-                self._load_libreelec_tar_from_network, "install", "LibreELEC TAR laden"
+                self._load_libreelec_tar_from_network, "install", "LibreELEC Download TAR"
             ),
         )
         self.network_tar_button.pack(side="left", padx=(0, 8))
@@ -516,9 +516,9 @@ class TransferApp(tk.Tk):
 
         self.activate_tar_button = ttk.Button(
             actions,
-            text="TAR als Update aktivieren",
+            text="Activate TAR as update",
             command=lambda: self._start_worker(
-                self._activate_loaded_libreelec_tar, "install", "LibreELEC TAR aktivieren"
+                self._activate_loaded_libreelec_tar, "install", "Activate LibreELEC TAR"
             ),
         )
         self.activate_tar_button.pack(side="left", padx=(0, 8))
@@ -1660,10 +1660,10 @@ class TransferApp(tk.Tk):
                 dialog.destroy()
                 done.set()
 
-            ttk.Button(buttons, text="Nein", width=10, command=lambda: finish(False)).pack(
+            ttk.Button(buttons, text="No", width=10, command=lambda: finish(False)).pack(
                 side="right"
             )
-            ttk.Button(buttons, text="Ja", width=10, command=lambda: finish(True)).pack(
+            ttk.Button(buttons, text="Yes", width=10, command=lambda: finish(True)).pack(
                 side="right", padx=(0, 8)
             )
 
@@ -3613,7 +3613,7 @@ class TransferApp(tk.Tk):
         target_root = f"{release_root}/target"
 
         if not self._ask_yes_no(
-            "Rollback erstellen",
+            "Create rollback",
             f"Create a rollback of the CURRENT installed LibreELEC system?\n\n"
             f"Installed: {version}\n"
             f"Platform: {prefix.removeprefix('LibreELEC-').removesuffix('-')}\n\n"
@@ -3694,13 +3694,13 @@ class TransferApp(tk.Tk):
             names[0]
             if len(names) == 1
             else self._choose_from_list(
-                "Rollback zurückspielen", "Select the rollback TAR to activate:", names
+                "Restore rollback", "Select the rollback TAR to activate:", names
             )
         )
         if not filename:
             raise TransferError("Rollback activation was cancelled.")
         if not self._ask_yes_no(
-            "Rollback zurückspielen",
+            "Restore rollback",
             f"Activate this rollback as the next LibreELEC update?\n\n{filename}",
         ):
             raise TransferError("Rollback activation was cancelled.")
@@ -3717,7 +3717,7 @@ class TransferApp(tk.Tk):
 
         labels = [entry["label"] for entry in entries]
         selected = self._choose_from_list(
-            "TAR laden",
+            "Download TAR",
             "Select any available version for this LibreELEC hardware platform. "
             "It will only be downloaded and stored; no update will be activated.",
             labels,
@@ -3730,7 +3730,7 @@ class TransferApp(tk.Tk):
         )
 
         if not self._ask_yes_no(
-            "TAR laden",
+            "Download TAR",
             f"Download to the LibreELEC device?\n\n{entry['name']}\n\n"
             f"Destination:\n{LIBREELEC_TAR_DIR}",
         ):
@@ -3763,7 +3763,7 @@ class TransferApp(tk.Tk):
             names[0]
             if len(names) == 1
             else self._choose_from_list(
-                "TAR als Update aktivieren", "Select the stored TAR to activate:", names
+                "Activate TAR as update", "Select the stored TAR to activate:", names
             )
         )
         if not filename:
@@ -3781,7 +3781,7 @@ class TransferApp(tk.Tk):
                 raise TransferError("TAR activation was cancelled.")
 
         if not self._ask_yes_no(
-            "TAR als Update aktivieren",
+            "Activate TAR as update",
             f"Copy this stored TAR to /storage/.update/?\n\n{filename}",
         ):
             raise TransferError("TAR activation was cancelled.")
