@@ -35,6 +35,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+import urllib.parse
 import zipfile
 
 import tkinter as tk
@@ -57,13 +58,18 @@ except ImportError:
 
 
 APP_TITLE = "JJS KODI Toolbox"
-APP_VERSION = "1.20"
+APP_VERSION = "1.21"
 META_NAME = "JJS_PROFILE_TRANSFER.json"
 
 DEFAULT_ADB_PORT = 5555
 DEFAULT_SSH_PORT = 22
 DEFAULT_ADB_DIR = Path(r"C:\ADB")
 ADB_DOWNLOAD_URL = "https://dl.google.com/android/repository/platform-tools-latest-windows.zip"
+LIBREELEC_RELEASES_URL = "https://releases.libreelec.tv/"
+JJS_KODI_RELEASES_API = "https://api.github.com/repos/jjs-hamburg/kodi-jjs/releases?per_page=50"
+LIBREELEC_TOOLBOX_ROOT = "/storage/.jjs-kodi-toolbox"
+LIBREELEC_ROLLBACK_DIR = f"{LIBREELEC_TOOLBOX_ROOT}/rollback"
+LIBREELEC_TAR_DIR = f"{LIBREELEC_TOOLBOX_ROOT}/tars"
 
 KNOWN_ANDROID_LABELS = {
     "org.xbmc.kodi": "Kodi",
@@ -476,6 +482,46 @@ class TransferApp(tk.Tk):
         )
         self.install_check_button.pack(side="left", padx=(0, 8))
         self._action_buttons.append(self.install_check_button)
+
+        self.rollback_create_button = ttk.Button(
+            actions,
+            text="Rollback erstellen",
+            command=lambda: self._start_worker(
+                self._create_libreelec_rollback, "install", "LibreELEC rollback erstellen"
+            ),
+        )
+        self.rollback_create_button.pack(side="left", padx=(0, 8))
+        self._action_buttons.append(self.rollback_create_button)
+
+        self.rollback_restore_button = ttk.Button(
+            actions,
+            text="Rollback zurückspielen",
+            command=lambda: self._start_worker(
+                self._restore_libreelec_rollback, "install", "LibreELEC rollback zurückspielen"
+            ),
+        )
+        self.rollback_restore_button.pack(side="left", padx=(0, 8))
+        self._action_buttons.append(self.rollback_restore_button)
+
+        self.network_tar_button = ttk.Button(
+            actions,
+            text="TAR laden",
+            command=lambda: self._start_worker(
+                self._load_libreelec_tar_from_network, "install", "LibreELEC TAR laden"
+            ),
+        )
+        self.network_tar_button.pack(side="left", padx=(0, 8))
+        self._action_buttons.append(self.network_tar_button)
+
+        self.activate_tar_button = ttk.Button(
+            actions,
+            text="TAR als Update aktivieren",
+            command=lambda: self._start_worker(
+                self._activate_loaded_libreelec_tar, "install", "LibreELEC TAR aktivieren"
+            ),
+        )
+        self.activate_tar_button.pack(side="left", padx=(0, 8))
+        self._action_buttons.append(self.activate_tar_button)
 
         self.install_action_button = ttk.Button(
             actions,
@@ -987,6 +1033,20 @@ class TransferApp(tk.Tk):
             self.install_action_button.configure(
                 text="INSTALL / UPDATE" if is_android else "TRANSFER UPDATE"
             )
+        if hasattr(self, "rollback_create_button"):
+            rollback_buttons = (
+                self.rollback_create_button,
+                self.rollback_restore_button,
+                self.network_tar_button,
+                self.activate_tar_button,
+            )
+            if is_android:
+                for button in rollback_buttons:
+                    button.pack_forget()
+            else:
+                for button in reversed(rollback_buttons):
+                    button.pack(side="left", padx=(0, 8), before=self.install_action_button)
+
         if hasattr(self, "uninstall_button"):
             if is_android:
                 self.uninstall_button.pack(side="left", padx=(0, 8))
@@ -1579,6 +1639,73 @@ class TransferApp(tk.Tk):
                 done.set()
 
         self.after(0, ask)
+        done.wait()
+        return answer["value"]
+
+    def _choose_from_list(self, title: str, message: str, choices: list[str]) -> str | None:
+        if not choices:
+            return None
+        done = threading.Event()
+        answer: dict[str, str | None] = {"value": None}
+
+        def show() -> None:
+            parent = (
+                self._operation_dialog
+                if self._operation_dialog is not None and self._operation_dialog.winfo_exists()
+                else self
+            )
+            dialog = tk.Toplevel(parent)
+            dialog.title(title)
+            dialog.transient(parent)
+            dialog.resizable(True, True)
+
+            body = ttk.Frame(dialog, padding=12)
+            body.pack(fill="both", expand=True)
+            ttk.Label(body, text=message, wraplength=700, justify="left").pack(anchor="w")
+
+            listbox = tk.Listbox(
+                body, width=100, height=min(14, max(4, len(choices))), exportselection=False
+            )
+            listbox.pack(fill="both", expand=True, pady=(10, 10))
+            for item in choices:
+                listbox.insert("end", item)
+            listbox.selection_set(0)
+            listbox.activate(0)
+
+            buttons = ttk.Frame(body)
+            buttons.pack(fill="x")
+
+            def finish(value: str | None) -> None:
+                answer["value"] = value
+                try:
+                    dialog.grab_release()
+                except Exception:
+                    pass
+                dialog.destroy()
+                done.set()
+
+            ttk.Button(
+                buttons,
+                text="OK",
+                command=lambda: finish(
+                    choices[int(listbox.curselection()[0])] if listbox.curselection() else None
+                ),
+            ).pack(side="right")
+            ttk.Button(buttons, text="Cancel", command=lambda: finish(None)).pack(
+                side="right", padx=(0, 8)
+            )
+            listbox.bind(
+                "<Double-Button-1>",
+                lambda _e: finish(
+                    choices[int(listbox.curselection()[0])] if listbox.curselection() else None
+                ),
+            )
+            dialog.protocol("WM_DELETE_WINDOW", lambda: finish(None))
+            self._center_child_on_main(dialog)
+            dialog.grab_set()
+            listbox.focus_set()
+
+        self.after(0, show)
         done.wait()
         return answer["value"]
 
