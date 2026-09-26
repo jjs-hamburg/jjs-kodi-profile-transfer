@@ -58,7 +58,7 @@ except ImportError:
 
 
 APP_TITLE = "JJS KODI Toolbox"
-APP_VERSION = "1.21"
+APP_VERSION = "1.22"
 META_NAME = "JJS_PROFILE_TRANSFER.json"
 
 DEFAULT_ADB_PORT = 5555
@@ -3320,11 +3320,21 @@ class TransferApp(tk.Tk):
     def _libreelec_image_prefix(self, info: dict) -> str:
         image = (info.get("distro_device") or info.get("distro_project") or "").strip()
         arch = (info.get("distro_arch") or "").strip()
-        if not image or not arch:
+
+        # LibreELEC 12.x uses LIBREELEC_ARCH values such as "Generic.x86_64".
+        # Newer builds may expose only the CPU architecture. Prefer the complete
+        # platform identifier when it is already present; otherwise combine the
+        # detected project/device with the architecture.
+        if arch and "." in arch:
+            platform_id = arch
+        elif image and arch:
+            platform_id = f"{image}.{arch}"
+        else:
             raise TransferError(
                 "LibreELEC image type could not be determined from /etc/os-release."
             )
-        return f"LibreELEC-{image}.{arch}-"
+
+        return f"LibreELEC-{platform_id}-"
 
     def _read_url_text(self, url: str, timeout: int = 30) -> str:
         request = urllib.request.Request(url, headers={"User-Agent": f"{APP_TITLE}/{APP_VERSION}"})
