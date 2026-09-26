@@ -3304,6 +3304,335 @@ class TransferApp(tk.Tk):
         self._set_status("install", f"Uninstalled {profile['name']}")
         self._ui_queue.put(("message", ("info", APP_TITLE, result)))
 
+    def _libreelec_image_prefix(self, info: dict) -> str:
+        image = (info.get("distro_device") or info.get("distro_project") or "").strip()
+        arch = (info.get("distro_arch") or "").strip()
+        if not image or not arch:
+            raise TransferError(
+                "LibreELEC image type could not be determined from /etc/os-release."
+            )
+        return f"LibreELEC-{image}.{arch}-"
+
+    def _read_url_text(self, url: str, timeout: int = 30) -> str:
+        request = urllib.request.Request(url, headers={"User-Agent": f"{APP_TITLE}/{APP_VERSION}"})
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.read().decode("utf-8", errors="replace")
+
+    def _expected_sha256_for_url(self, url: str, required: bool = False) -> str:
+        try:
+            text = self._read_url_text(url + ".sha256", timeout=30)
+        except Exception as e:
+            if required:
+                raise TransferError(f"Official SHA256 could not be loaded: {e}") from e
+            return ""
+        match = re.search(r"\b([0-9a-fA-F]{64})\b", text)
+        if not match:
+            if required:
+                raise TransferError("Official SHA256 file contains no SHA256 value.")
+            return ""
+        return match.group(1).lower()
+
+    def _network_libreelec_tars(self, info: dict) -> list[dict]:
+        prefix = self._libreelec_image_prefix(info)
+        entries: dict[str, dict] = {}
+
+        try:
+            index = self._read_url_text(LIBREELEC_RELEASES_URL, timeout=30)
+            for href in re.findall(r'href=["\']([^"\']+\.tar)["\']', index, flags=re.IGNORECASE):
+                url = urllib.parse.urljoin(LIBREELEC_RELEASES_URL, href)
+                name = PurePosixPath(urllib.parse.urlparse(url).path).name
+                if name.startswith(prefix):
+                    entries[url] = {"label": f"[LibreELEC] {name}", "url": url, "name": name}
+        except Exception as e:
+            self.log(f"LibreELEC release list could not be loaded: {e}")
+
+        try:
+            releases = json.loads(self._read_url_text(JJS_KODI_RELEASES_API, timeout=30))
+            if isinstance(releases, list):
+                for release in releases:
+                    if release.get("draft"):
+                        continue
+                    for asset in release.get("assets", []):
+                        name = str(asset.get("name", ""))
+                        url = str(asset.get("browser_download_url", ""))
+                        if name.startswith(prefix) and name.endswith(".tar") and url:
+                            entries[url] = {
+                                "label": f"[JJS] {name}",
+                                "url": url,
+                                "name": name,
+                            }
+        except Exception as e:
+            self.log(f"JJS release list could not be loaded: {e}")
+
+        return sorted(entries.values(), key=lambda item: item["label"], reverse=True)
+
+    def _remote_tar_names(self, directory: str, info: dict) -> list[str]:
+        prefix = self._libreelec_image_prefix(info)
+        client = self._ssh_client("install")
+        try:
+            command = (
+                f"mkdir -p {shlex.quote(directory)}; "
+                f"for f in {shlex.quote(directory)}/*.tar; do "
+                "[ -f \"$f\" ] || continue; basename \"$f\"; done"
+            )
+            code, out, err = self._ssh_exec(client, command, timeout=30)
+            if code != 0:
+                raise TransferError(f"Stored TAR files could not be listed: {err}")
+        finally:
+            client.close()
+        return sorted(
+            [name.strip() for name in out.splitlines() if name.strip().startswith(prefix)],
+            reverse=True,
+        )
+
+    def _download_tar_to_libreelec(
+        self,
+        url: str,
+        filename: str,
+        destination_dir: str,
+        expected_sha256: str = "",
+    ) -> tuple[str, str]:
+        client = self._ssh_client("install")
+        remote_final = f"{destination_dir}/{filename}"
+        remote_temp = f"{destination_dir}/.jjs-download-{int(time.time())}.tmp"
+        try:
+            self._set_progress(20, "Preparing download")
+            command = (
+                f"mkdir -p {shlex.quote(destination_dir)} && "
+                f"rm -f {shlex.quote(remote_temp)} && "
+                f"wget -O {shlex.quote(remote_temp)} {shlex.quote(url)}"
+            )
+            self.log(f"Downloading on LibreELEC: {filename}")
+            code, _, err = self._ssh_exec(client, command, timeout=1800)
+            if code != 0:
+                self._ssh_exec(client, f"rm -f {shlex.quote(remote_temp)}", timeout=30)
+                raise TransferError(f"TAR download failed: {err or 'wget failed'}")
+
+            self._set_progress(78, "Verifying TAR")
+            code, actual, err = self._ssh_exec(
+                client,
+                f"sha256sum {shlex.quote(remote_temp)} | awk '{{print $1}}'",
+                timeout=120,
+            )
+            actual = actual.strip().lower()
+            if code != 0 or not re.fullmatch(r"[0-9a-f]{64}", actual):
+                self._ssh_exec(client, f"rm -f {shlex.quote(remote_temp)}", timeout=30)
+                raise TransferError(f"Downloaded TAR could not be hashed: {err}")
+            if expected_sha256 and actual != expected_sha256.lower():
+                self._ssh_exec(client, f"rm -f {shlex.quote(remote_temp)}", timeout=30)
+                raise TransferError(
+                    f"SHA256 mismatch for {filename}. Expected {expected_sha256}, got {actual}."
+                )
+
+            command = (
+                f"mv -f {shlex.quote(remote_temp)} {shlex.quote(remote_final)} && "
+                f"printf '%s  %s\\n' {shlex.quote(actual)} {shlex.quote(filename)} "
+                f"> {shlex.quote(remote_final + '.sha256')}"
+            )
+            code, _, err = self._ssh_exec(client, command, timeout=30)
+            if code != 0:
+                raise TransferError(f"Downloaded TAR could not be stored: {err}")
+        finally:
+            client.close()
+
+        self._set_progress(95, "TAR stored")
+        return remote_final, actual
+
+    def _activate_remote_libreelec_tar(self, directory: str, filename: str) -> None:
+        source = f"{directory}/{filename}"
+        client = self._ssh_client("install")
+        try:
+            code, _, _ = self._ssh_exec(client, f"test -f {shlex.quote(source)}", timeout=20)
+            if code != 0:
+                raise TransferError(f"Stored TAR not found: {source}")
+
+            checksum_file = source + ".sha256"
+            code, _, _ = self._ssh_exec(
+                client, f"test -f {shlex.quote(checksum_file)}", timeout=20
+            )
+            if code == 0:
+                verify = (
+                    f"expected=$(awk '{{print $1; exit}}' {shlex.quote(checksum_file)}); "
+                    f"actual=$(sha256sum {shlex.quote(source)} | awk '{{print $1}}'); "
+                    '[ "$expected" = "$actual" ]'
+                )
+                code, _, err = self._ssh_exec(client, verify, timeout=120)
+                if code != 0:
+                    raise TransferError(f"Stored TAR failed SHA256 verification: {err}")
+
+            code, existing, _ = self._ssh_exec(
+                client, "ls -1 /storage/.update/*.tar 2>/dev/null || true", timeout=20
+            )
+            if code == 0 and existing.strip():
+                client.close()
+                if not self._ask_yes_no(
+                    "LibreELEC update already staged",
+                    "There is already a TAR in /storage/.update/.\n\n"
+                    f"{existing.strip()}\n\nReplace it with {filename}?",
+                ):
+                    raise TransferError("Update activation was cancelled.")
+                client = self._ssh_client("install")
+
+            self._set_progress(70, "Activating update TAR")
+            remote_temp = f"/storage/.update/.jjs-activate-{int(time.time())}.tmp"
+            remote_final = f"/storage/.update/{filename}"
+            command = (
+                "mkdir -p /storage/.update && "
+                "rm -f /storage/.update/*.tar && "
+                f"cp {shlex.quote(source)} {shlex.quote(remote_temp)} && "
+                f"mv -f {shlex.quote(remote_temp)} {shlex.quote(remote_final)}"
+            )
+            code, _, err = self._ssh_exec(client, command, timeout=300)
+            if code != 0:
+                raise TransferError(f"LibreELEC update could not be activated: {err}")
+
+            self._set_progress(95, "Update TAR activated")
+            self.log(f"LibreELEC update activated: {remote_final}")
+            reboot = self._ask_yes_no(
+                "LibreELEC update ready",
+                f"Update is ready:\n{remote_final}\n\nRestart LibreELEC now?",
+            )
+            if reboot:
+                self.log("$ ssh: systemctl reboot")
+                try:
+                    client.exec_command("systemctl reboot")
+                    time.sleep(0.5)
+                except Exception as e:
+                    self.log(f"Reboot command sent; connection closed with: {e}")
+                self._set_status("install", "Update activated – reboot requested")
+            else:
+                self._set_status("install", "Update activated – reboot later to install")
+        finally:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+    def _create_libreelec_rollback(self) -> None:
+        info = self._inspect_install_device()
+        if info["platform"] != "libreelec":
+            raise TransferError("Rollback is available only for LibreELEC.")
+
+        version_text = info.get("libreelec_version", "") or info.get("device", "")
+        match = re.search(r"\d+\.\d+(?:\.\d+)?", version_text)
+        if not match:
+            raise TransferError("Installed LibreELEC base version could not be determined.")
+        version = match.group(0)
+        filename = f"{self._libreelec_image_prefix(info)}{version}.tar"
+        url = urllib.parse.urljoin(LIBREELEC_RELEASES_URL, filename)
+        expected = self._expected_sha256_for_url(url, required=True)
+
+        if not self._ask_yes_no(
+            "Rollback erstellen",
+            f"Official rollback TAR:\n{filename}\n\n"
+            f"Store it on {info['device']} under:\n{LIBREELEC_ROLLBACK_DIR}\n\nContinue?",
+        ):
+            raise TransferError("Rollback creation was cancelled.")
+
+        remote, actual = self._download_tar_to_libreelec(
+            url, filename, LIBREELEC_ROLLBACK_DIR, expected
+        )
+        self._set_status("install", f"Rollback ready: {filename}")
+        self._ui_queue.put(
+            (
+                "message",
+                (
+                    "info",
+                    APP_TITLE,
+                    f"Rollback stored on LibreELEC:\n{remote}\n\nSHA256: {actual}",
+                ),
+            )
+        )
+
+    def _restore_libreelec_rollback(self) -> None:
+        info = self._inspect_install_device()
+        if info["platform"] != "libreelec":
+            raise TransferError("Rollback is available only for LibreELEC.")
+        names = self._remote_tar_names(LIBREELEC_ROLLBACK_DIR, info)
+        if not names:
+            raise TransferError("No compatible rollback TAR is stored on this LibreELEC device.")
+        filename = (
+            names[0]
+            if len(names) == 1
+            else self._choose_from_list(
+                "Rollback zurückspielen", "Select the rollback TAR to activate:", names
+            )
+        )
+        if not filename:
+            raise TransferError("Rollback activation was cancelled.")
+        if not self._ask_yes_no(
+            "Rollback zurückspielen",
+            f"Activate this rollback as the next LibreELEC update?\n\n{filename}",
+        ):
+            raise TransferError("Rollback activation was cancelled.")
+        self._activate_remote_libreelec_tar(LIBREELEC_ROLLBACK_DIR, filename)
+
+    def _load_libreelec_tar_from_network(self) -> None:
+        info = self._inspect_install_device()
+        if info["platform"] != "libreelec":
+            raise TransferError("Network TAR download is available only for LibreELEC.")
+        self._set_progress(12, "Loading available TAR files")
+        entries = self._network_libreelec_tars(info)
+        if not entries:
+            raise TransferError("No compatible LibreELEC TAR files were found online.")
+
+        labels = [entry["label"] for entry in entries]
+        selected = self._choose_from_list(
+            "TAR laden",
+            "Select a compatible TAR. It will only be downloaded and stored; no update will be activated.",
+            labels,
+        )
+        if not selected:
+            raise TransferError("TAR download was cancelled.")
+        entry = next(item for item in entries if item["label"] == selected)
+        expected = self._expected_sha256_for_url(entry["url"], required=False)
+
+        if not self._ask_yes_no(
+            "TAR laden",
+            f"Download to the LibreELEC device?\n\n{entry['name']}\n\n"
+            f"Destination:\n{LIBREELEC_TAR_DIR}",
+        ):
+            raise TransferError("TAR download was cancelled.")
+
+        remote, actual = self._download_tar_to_libreelec(
+            entry["url"], entry["name"], LIBREELEC_TAR_DIR, expected
+        )
+        verification = "publisher SHA256 verified" if expected else "local SHA256 stored"
+        self._set_status("install", f"TAR stored: {entry['name']}")
+        self._ui_queue.put(
+            (
+                "message",
+                (
+                    "info",
+                    APP_TITLE,
+                    f"TAR stored on LibreELEC:\n{remote}\n\nSHA256: {actual}\n{verification}",
+                ),
+            )
+        )
+
+    def _activate_loaded_libreelec_tar(self) -> None:
+        info = self._inspect_install_device()
+        if info["platform"] != "libreelec":
+            raise TransferError("TAR activation is available only for LibreELEC.")
+        names = self._remote_tar_names(LIBREELEC_TAR_DIR, info)
+        if not names:
+            raise TransferError("No compatible downloaded TAR is stored on this LibreELEC device.")
+        filename = (
+            names[0]
+            if len(names) == 1
+            else self._choose_from_list(
+                "TAR als Update aktivieren", "Select the stored TAR to activate:", names
+            )
+        )
+        if not filename:
+            raise TransferError("TAR activation was cancelled.")
+        if not self._ask_yes_no(
+            "TAR als Update aktivieren",
+            f"Copy this stored TAR to /storage/.update/?\n\n{filename}",
+        ):
+            raise TransferError("TAR activation was cancelled.")
+        self._activate_remote_libreelec_tar(LIBREELEC_TAR_DIR, filename)
+
     def _upload_libreelec_update(self, path: Path, info: dict) -> None:
         if not self._ask_yes_no(
             "Transfer LibreELEC update",
