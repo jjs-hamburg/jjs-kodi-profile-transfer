@@ -21,7 +21,7 @@ Current version: **1.23**
   - Android: detect multiple Kodi installations and uninstall a selected one
   - Fresh Android installs: configure microphone and "All files" access where supported
   - LibreELEC: upload a local update TAR to `/storage/.update/` and optionally reboot
-  - LibreELEC: create and restore an official rollback TAR stored on the LibreELEC device itself
+  - LibreELEC: create and restore a rollback TAR from the currently installed LibreELEC KERNEL/SYSTEM, stored on the LibreELEC device itself
   - LibreELEC: browse official/JJS TAR releases for the detected hardware platform across all available versions and download them to `/storage/.jjs-kodi-toolbox/tars/` without activating an update
   - LibreELEC: activate a previously downloaded TAR separately by copying it to `/storage/.update/`; a platform mismatch warns but does not block activation
 
