@@ -1197,19 +1197,20 @@ class TransferApp(tk.Tk):
         )
 
     def _browse_adb_dir(self) -> None:
-        p = filedialog.askdirectory(initialdir=self.adb_dir_var.get() or str(DEFAULT_ADB_DIR))
+        p = filedialog.askdirectory(parent=self, initialdir=self.adb_dir_var.get() or str(DEFAULT_ADB_DIR))
         if p:
             self.adb_dir_var.set(p)
 
     def _browse_backup_dir(self) -> None:
         initial = self.backup_dir_var.get() or str(default_backup_dir())
-        p = filedialog.askdirectory(initialdir=initial)
+        p = filedialog.askdirectory(parent=self, initialdir=initial)
         if p:
             self.backup_dir_var.set(p)
 
     def _browse_backup_file(self) -> None:
         initial = self.backup_dir_var.get() or str(default_backup_dir())
         p = filedialog.askopenfilename(
+            parent=self,
             title="Select Kodi profile backup",
             initialdir=initial,
             filetypes=[("Kodi profile TAR", "*.tar"), ("All files", "*.*")],
@@ -1219,19 +1220,20 @@ class TransferApp(tk.Tk):
 
     def _browse_screenshot_dir(self) -> None:
         initial = self.screenshot_dir_var.get() or str(default_screenshot_dir())
-        p = filedialog.askdirectory(initialdir=initial)
+        p = filedialog.askdirectory(parent=self, initialdir=initial)
         if p:
             self.screenshot_dir_var.set(p)
 
     def _browse_database_backup_dir(self) -> None:
         initial = self.database_backup_dir_var.get() or str(default_database_backup_dir())
-        p = filedialog.askdirectory(initialdir=initial)
+        p = filedialog.askdirectory(parent=self, initialdir=initial)
         if p:
             self.database_backup_dir_var.set(p)
 
     def _browse_database_restore_file(self) -> None:
         initial = self.database_backup_dir_var.get() or str(default_database_backup_dir())
         p = filedialog.askopenfilename(
+            parent=self,
             title="Select JJS database backup",
             initialdir=initial,
             filetypes=[("JJS database backup", "*.zip"), ("All files", "*.*")],
@@ -1249,7 +1251,9 @@ class TransferApp(tk.Tk):
         else:
             filetypes = [("LibreELEC update TAR", "*.tar"), ("All files", "*.*")]
             title = "Select LibreELEC update TAR"
-        p = filedialog.askopenfilename(title=title, initialdir=initial, filetypes=filetypes)
+        p = filedialog.askopenfilename(
+            parent=self, title=title, initialdir=initial, filetypes=filetypes
+        )
         if p:
             self.install_file_var.set(p)
 
@@ -1630,12 +1634,7 @@ class TransferApp(tk.Tk):
 
         def ask() -> None:
             try:
-                parent = (
-                    self._operation_dialog
-                    if self._operation_dialog is not None and self._operation_dialog.winfo_exists()
-                    else self
-                )
-                answer["value"] = bool(messagebox.askyesno(title, message, parent=parent))
+                answer["value"] = bool(messagebox.askyesno(title, message, parent=self))
             finally:
                 done.set()
 
@@ -1650,14 +1649,9 @@ class TransferApp(tk.Tk):
         answer: dict[str, str | None] = {"value": None}
 
         def show() -> None:
-            parent = (
-                self._operation_dialog
-                if self._operation_dialog is not None and self._operation_dialog.winfo_exists()
-                else self
-            )
-            dialog = tk.Toplevel(parent)
+            dialog = tk.Toplevel(self)
             dialog.title(title)
-            dialog.transient(parent)
+            dialog.transient(self)
             dialog.resizable(True, True)
 
             body = ttk.Frame(dialog, padding=12)
