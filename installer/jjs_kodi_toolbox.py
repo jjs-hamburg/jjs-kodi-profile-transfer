@@ -2966,10 +2966,22 @@ class TransferApp(tk.Tk):
             "version": kodi_version.strip(),
             "libreelec_version": release_values.get("VERSION", "").strip(),
             "libreelec_version_id": release_values.get("VERSION_ID", "").strip(),
-            "distro_arch": release_values.get("DISTRO_ARCH", "").strip(),
-            "distro_build": release_values.get("DISTRO_BUILD", "").strip(),
-            "distro_project": release_values.get("DISTRO_PROJECT", "").strip(),
-            "distro_device": release_values.get("DISTRO_DEVICE", "").strip(),
+            "distro_arch": (
+                release_values.get("LIBREELEC_ARCH", "")
+                or release_values.get("DISTRO_ARCH", "")
+            ).strip(),
+            "distro_build": (
+                release_values.get("LIBREELEC_BUILD", "")
+                or release_values.get("DISTRO_BUILD", "")
+            ).strip(),
+            "distro_project": (
+                release_values.get("LIBREELEC_PROJECT", "")
+                or release_values.get("DISTRO_PROJECT", "")
+            ).strip(),
+            "distro_device": (
+                release_values.get("LIBREELEC_DEVICE", "")
+                or release_values.get("DISTRO_DEVICE", "")
+            ).strip(),
             "profiles": [],
         }
 
