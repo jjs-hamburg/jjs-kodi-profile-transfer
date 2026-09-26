@@ -112,7 +112,8 @@ jobs:
           python -c "from pathlib import Path; s=Path('installer/jjs_kodi_toolbox.py').read_text(encoding='utf-8'); assert 'def _create_libreelec_rollback' in s; assert 'def _restore_libreelec_rollback' in s; assert 'def _load_libreelec_tar_from_network' in s; assert 'def _activate_loaded_libreelec_tar' in s; assert '/storage/.jjs-kodi-toolbox/rollback' in s; assert '/storage/.jjs-kodi-toolbox/tars' in s; print('LibreELEC rollback/TAR paths OK')"
           python -c "from installer.jjs_kodi_toolbox import TransferApp; a=object.__new__(TransferApp); assert a._libreelec_image_prefix({'distro_arch':'Generic.x86_64','distro_project':'Generic','distro_device':'Generic'}) == 'LibreELEC-Generic.x86_64-'; assert a._libreelec_image_prefix({'distro_arch':'x86_64','distro_project':'Generic','distro_device':''}) == 'LibreELEC-Generic.x86_64-'; print('LibreELEC platform naming OK')"
           python -c "from pathlib import Path; s=Path('installer/jjs_kodi_toolbox.py').read_text(encoding='utf-8'); assert 'compatible_only=False' in s; assert 'LibreELEC platform warning' in s; assert 'parent=self' in s; print('LibreELEC activation warning and dialog parenting OK')"
-          python -c "from pathlib import Path; s=Path('installer/jjs_kodi_toolbox.py').read_text(encoding='utf-8'); a=s[s.index('    def _ask_yes_no'):s.index('    def _choose_from_list')]; assert 'messagebox.askyesno' not in a; assert 'self._center_child_on_main(dialog)' in a; assert 'Downloading TAR on LibreELEC' in s; print('Centered confirmations and download label OK')"
+          python -c "from pathlib import Path; s=Path('installer/jjs_kodi_toolbox.py').read_text(encoding='utf-8'); a=s[s.index('    def _ask_yes_no'):s.index('    def _choose_from_list')]; assert 'messagebox.askyesno' not in a; assert 'self._center_child_on_main(dialog)' in a; assert 'Downloading {filename}' in s; print('Centered confirmations and exact download label OK')"
+          python -c "from pathlib import Path; s=Path('installer/jjs_kodi_toolbox.py').read_text(encoding='utf-8'); a=s[s.index('    def _create_libreelec_rollback'):s.index('    def _restore_libreelec_rollback')]; assert '/flash/KERNEL' in a and '/flash/SYSTEM' in a; assert '_network_libreelec_tars' not in a; assert 'No network download is used.' in a; print('LibreELEC rollback uses current installed system OK')"
           python -c "from pathlib import Path; s=Path('installer/jjs_kodi_toolbox.py').read_text(encoding='utf-8'); assert 'def _build_screenshot_tab' in s; assert 'def _take_android_screenshot' in s; assert 'screencap' in s; assert 'TakeScreenshot({remote},sync)' in s; assert 'Temporary LibreELEC screenshot removed.' in s; print('Screenshot paths OK')"
 
       - name: Build single EXE
@@ -154,7 +155,7 @@ jobs:
         run: |
           $tag = "v1.23"
           $title = "JJS KODI Toolbox 1.23"
-          $notes = "Centers Toolbox confirmation dialogs reliably on the main Toolbox window and clarifies LibreELEC network TAR download progress with an explicit Downloading TAR on LibreELEC status."
+          $notes = "Centers Toolbox confirmation dialogs on the main window, shows the exact LibreELEC TAR filename while downloading, and fixes Rollback erstellen so it packages the currently installed /flash/KERNEL and /flash/SYSTEM instead of downloading a substitute image. TAR laden remains the path for choosing other LibreELEC versions."
 
           if (gh release view $tag 2>$null) {
             gh release upload $tag dist/JJS-KODI-Toolbox.exe dist/SHA256SUMS.txt --clobber
