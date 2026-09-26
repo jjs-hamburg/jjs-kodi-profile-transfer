@@ -3482,7 +3482,7 @@ class TransferApp(tk.Tk):
         remote_final = f"{destination_dir}/{filename}"
         remote_temp = f"{destination_dir}/.jjs-download-{int(time.time())}.tmp"
         try:
-            self._set_progress(20, "Downloading TAR on LibreELEC …")
+            self._set_progress(20, f"Downloading {filename} …")
             command = (
                 f"mkdir -p {shlex.quote(destination_dir)} && "
                 f"rm -f {shlex.quote(remote_temp)} && "
