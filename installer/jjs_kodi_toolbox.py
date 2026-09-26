@@ -66,6 +66,7 @@ DEFAULT_SSH_PORT = 22
 DEFAULT_ADB_DIR = Path(r"C:\ADB")
 ADB_DOWNLOAD_URL = "https://dl.google.com/android/repository/platform-tools-latest-windows.zip"
 LIBREELEC_RELEASES_URL = "https://releases.libreelec.tv/"
+LIBREELEC_RELEASES_JSON = "https://releases.libreelec.tv/releases.json"
 JJS_KODI_RELEASES_API = "https://api.github.com/repos/jjs-hamburg/kodi-jjs/releases?per_page=50"
 LIBREELEC_TOOLBOX_ROOT = "/storage/.jjs-kodi-toolbox"
 LIBREELEC_ROLLBACK_DIR = f"{LIBREELEC_TOOLBOX_ROOT}/rollback"
@@ -1044,7 +1045,7 @@ class TransferApp(tk.Tk):
                 for button in rollback_buttons:
                     button.pack_forget()
             else:
-                for button in reversed(rollback_buttons):
+                for button in rollback_buttons:
                     button.pack(side="left", padx=(0, 8), before=self.install_action_button)
 
         if hasattr(self, "uninstall_button"):
@@ -3337,12 +3338,41 @@ class TransferApp(tk.Tk):
         entries: dict[str, dict] = {}
 
         try:
-            index = self._read_url_text(LIBREELEC_RELEASES_URL, timeout=30)
-            for href in re.findall(r'href=["\']([^"\']+\.tar)["\']', index, flags=re.IGNORECASE):
-                url = urllib.parse.urljoin(LIBREELEC_RELEASES_URL, href)
-                name = PurePosixPath(urllib.parse.urlparse(url).path).name
-                if name.startswith(prefix):
-                    entries[url] = {"label": f"[LibreELEC] {name}", "url": url, "name": name}
+            catalog = json.loads(self._read_url_text(LIBREELEC_RELEASES_JSON, timeout=30))
+            if isinstance(catalog, dict):
+                for channel in catalog.values():
+                    if not isinstance(channel, dict):
+                        continue
+                    base_url = str(channel.get("url") or LIBREELEC_RELEASES_URL).replace(
+                        "http://", "https://", 1
+                    )
+                    projects = channel.get("project", {})
+                    if not isinstance(projects, dict):
+                        continue
+                    for project in projects.values():
+                        if not isinstance(project, dict):
+                            continue
+                        releases = project.get("releases", {})
+                        if not isinstance(releases, dict):
+                            continue
+                        for release in releases.values():
+                            if not isinstance(release, dict):
+                                continue
+                            file_info = release.get("file")
+                            if not isinstance(file_info, dict):
+                                continue
+                            name = str(file_info.get("name", ""))
+                            if not (name.startswith(prefix) and name.endswith(".tar")):
+                                continue
+                            subpath = str(file_info.get("subpath", "")).strip("/")
+                            relative = f"{subpath}/{name}" if subpath else name
+                            url = urllib.parse.urljoin(base_url.rstrip("/") + "/", relative)
+                            entries[url] = {
+                                "label": f"[LibreELEC] {name}",
+                                "url": url,
+                                "name": name,
+                                "sha256": str(file_info.get("sha256", "")).lower(),
+                            }
         except Exception as e:
             self.log(f"LibreELEC release list could not be loaded: {e}")
 
@@ -3360,6 +3390,7 @@ class TransferApp(tk.Tk):
                                 "label": f"[JJS] {name}",
                                 "url": url,
                                 "name": name,
+                                "sha256": "",
                             }
         except Exception as e:
             self.log(f"JJS release list could not be loaded: {e}")
@@ -3519,8 +3550,20 @@ class TransferApp(tk.Tk):
             raise TransferError("Installed LibreELEC base version could not be determined.")
         version = match.group(0)
         filename = f"{self._libreelec_image_prefix(info)}{version}.tar"
-        url = urllib.parse.urljoin(LIBREELEC_RELEASES_URL, filename)
-        expected = self._expected_sha256_for_url(url, required=True)
+        official = [
+            item
+            for item in self._network_libreelec_tars(info)
+            if item["label"].startswith("[LibreELEC] ") and item["name"] == filename
+        ]
+        if not official:
+            raise TransferError(
+                f"The matching official LibreELEC rollback TAR was not found: {filename}"
+            )
+        entry = official[0]
+        url = entry["url"]
+        expected = entry.get("sha256", "")
+        if not re.fullmatch(r"[0-9a-f]{64}", expected):
+            raise TransferError("Official LibreELEC catalog contains no valid SHA256 for rollback.")
 
         if not self._ask_yes_no(
             "Rollback erstellen",
@@ -3585,7 +3628,9 @@ class TransferApp(tk.Tk):
         if not selected:
             raise TransferError("TAR download was cancelled.")
         entry = next(item for item in entries if item["label"] == selected)
-        expected = self._expected_sha256_for_url(entry["url"], required=False)
+        expected = entry.get("sha256", "") or self._expected_sha256_for_url(
+            entry["url"], required=False
+        )
 
         if not self._ask_yes_no(
             "TAR laden",
