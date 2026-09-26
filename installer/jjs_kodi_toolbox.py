@@ -2940,10 +2940,13 @@ class TransferApp(tk.Tk):
             if code != 0:
                 raise TransferError("CPU architecture could not be determined.")
             _, kodi_version, _ = self._ssh_exec(client, "kodi --version 2>/dev/null | head -1", timeout=20)
-            pretty = ""
-            m = re.search(r'^PRETTY_NAME=["\']?([^"\'\n]+)', os_release, flags=re.MULTILINE)
-            if m:
-                pretty = m.group(1).strip()
+            release_values: dict[str, str] = {}
+            for line in os_release.splitlines():
+                if "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                release_values[key.strip()] = value.strip().strip('"').strip("'")
+            pretty = release_values.get("PRETTY_NAME", "").strip()
         finally:
             client.close()
 
@@ -2960,6 +2963,12 @@ class TransferApp(tk.Tk):
             "arch": arch.strip(),
             "arch_family": arch_family(arch),
             "version": kodi_version.strip(),
+            "libreelec_version": release_values.get("VERSION", "").strip(),
+            "libreelec_version_id": release_values.get("VERSION_ID", "").strip(),
+            "distro_arch": release_values.get("DISTRO_ARCH", "").strip(),
+            "distro_build": release_values.get("DISTRO_BUILD", "").strip(),
+            "distro_project": release_values.get("DISTRO_PROJECT", "").strip(),
+            "distro_device": release_values.get("DISTRO_DEVICE", "").strip(),
             "profiles": [],
         }
 
