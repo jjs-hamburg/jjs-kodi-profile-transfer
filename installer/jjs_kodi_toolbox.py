@@ -58,7 +58,7 @@ except ImportError:
 
 
 APP_TITLE = "JJS KODI Toolbox"
-APP_VERSION = "1.24"
+APP_VERSION = "1.25"
 META_NAME = "JJS_PROFILE_TRANSFER.json"
 
 DEFAULT_ADB_PORT = 5555
@@ -240,7 +240,12 @@ class PromptHostKeyPolicy(paramiko.MissingHostKeyPolicy if paramiko else object)
 
 class TransferApp(tk.Tk):
     def __init__(self) -> None:
+        if os.name == "nt":
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("JJS.KODI.Toolbox")
         super().__init__()
+        icon_path = Path(__file__).resolve().parent / "assets" / "jjs-kodi-toolbox.ico"
+        if os.name == "nt" and icon_path.is_file():
+            self.iconbitmap(default=str(icon_path))
         self.title(f"{APP_TITLE}  {APP_VERSION}")
         self.geometry("1040x820")
         self.minsize(920, 720)
