@@ -58,7 +58,7 @@ except ImportError:
 
 
 APP_TITLE = "JJS KODI Toolbox"
-APP_VERSION = "1.21"
+APP_VERSION = "1.22"
 META_NAME = "JJS_PROFILE_TRANSFER.json"
 
 DEFAULT_ADB_PORT = 5555
@@ -1197,19 +1197,20 @@ class TransferApp(tk.Tk):
         )
 
     def _browse_adb_dir(self) -> None:
-        p = filedialog.askdirectory(initialdir=self.adb_dir_var.get() or str(DEFAULT_ADB_DIR))
+        p = filedialog.askdirectory(parent=self, initialdir=self.adb_dir_var.get() or str(DEFAULT_ADB_DIR))
         if p:
             self.adb_dir_var.set(p)
 
     def _browse_backup_dir(self) -> None:
         initial = self.backup_dir_var.get() or str(default_backup_dir())
-        p = filedialog.askdirectory(initialdir=initial)
+        p = filedialog.askdirectory(parent=self, initialdir=initial)
         if p:
             self.backup_dir_var.set(p)
 
     def _browse_backup_file(self) -> None:
         initial = self.backup_dir_var.get() or str(default_backup_dir())
         p = filedialog.askopenfilename(
+            parent=self,
             title="Select Kodi profile backup",
             initialdir=initial,
             filetypes=[("Kodi profile TAR", "*.tar"), ("All files", "*.*")],
@@ -1219,19 +1220,20 @@ class TransferApp(tk.Tk):
 
     def _browse_screenshot_dir(self) -> None:
         initial = self.screenshot_dir_var.get() or str(default_screenshot_dir())
-        p = filedialog.askdirectory(initialdir=initial)
+        p = filedialog.askdirectory(parent=self, initialdir=initial)
         if p:
             self.screenshot_dir_var.set(p)
 
     def _browse_database_backup_dir(self) -> None:
         initial = self.database_backup_dir_var.get() or str(default_database_backup_dir())
-        p = filedialog.askdirectory(initialdir=initial)
+        p = filedialog.askdirectory(parent=self, initialdir=initial)
         if p:
             self.database_backup_dir_var.set(p)
 
     def _browse_database_restore_file(self) -> None:
         initial = self.database_backup_dir_var.get() or str(default_database_backup_dir())
         p = filedialog.askopenfilename(
+            parent=self,
             title="Select JJS database backup",
             initialdir=initial,
             filetypes=[("JJS database backup", "*.zip"), ("All files", "*.*")],
@@ -1249,7 +1251,9 @@ class TransferApp(tk.Tk):
         else:
             filetypes = [("LibreELEC update TAR", "*.tar"), ("All files", "*.*")]
             title = "Select LibreELEC update TAR"
-        p = filedialog.askopenfilename(title=title, initialdir=initial, filetypes=filetypes)
+        p = filedialog.askopenfilename(
+            parent=self, title=title, initialdir=initial, filetypes=filetypes
+        )
         if p:
             self.install_file_var.set(p)
 
@@ -1630,12 +1634,7 @@ class TransferApp(tk.Tk):
 
         def ask() -> None:
             try:
-                parent = (
-                    self._operation_dialog
-                    if self._operation_dialog is not None and self._operation_dialog.winfo_exists()
-                    else self
-                )
-                answer["value"] = bool(messagebox.askyesno(title, message, parent=parent))
+                answer["value"] = bool(messagebox.askyesno(title, message, parent=self))
             finally:
                 done.set()
 
@@ -1650,14 +1649,9 @@ class TransferApp(tk.Tk):
         answer: dict[str, str | None] = {"value": None}
 
         def show() -> None:
-            parent = (
-                self._operation_dialog
-                if self._operation_dialog is not None and self._operation_dialog.winfo_exists()
-                else self
-            )
-            dialog = tk.Toplevel(parent)
+            dialog = tk.Toplevel(self)
             dialog.title(title)
-            dialog.transient(parent)
+            dialog.transient(self)
             dialog.resizable(True, True)
 
             body = ttk.Frame(dialog, padding=12)
@@ -3320,11 +3314,21 @@ class TransferApp(tk.Tk):
     def _libreelec_image_prefix(self, info: dict) -> str:
         image = (info.get("distro_device") or info.get("distro_project") or "").strip()
         arch = (info.get("distro_arch") or "").strip()
-        if not image or not arch:
+
+        # LibreELEC 12.x uses LIBREELEC_ARCH values such as "Generic.x86_64".
+        # Newer builds may expose only the CPU architecture. Prefer the complete
+        # platform identifier when it is already present; otherwise combine the
+        # detected project/device with the architecture.
+        if arch and "." in arch:
+            platform_id = arch
+        elif image and arch:
+            platform_id = f"{image}.{arch}"
+        else:
             raise TransferError(
                 "LibreELEC image type could not be determined from /etc/os-release."
             )
-        return f"LibreELEC-{image}.{arch}-"
+
+        return f"LibreELEC-{platform_id}-"
 
     def _read_url_text(self, url: str, timeout: int = 30) -> str:
         request = urllib.request.Request(url, headers={"User-Agent": f"{APP_TITLE}/{APP_VERSION}"})
@@ -3409,8 +3413,10 @@ class TransferApp(tk.Tk):
 
         return sorted(entries.values(), key=lambda item: item["label"], reverse=True)
 
-    def _remote_tar_names(self, directory: str, info: dict) -> list[str]:
-        prefix = self._libreelec_image_prefix(info)
+    def _remote_tar_names(
+        self, directory: str, info: dict, compatible_only: bool = True
+    ) -> list[str]:
+        prefix = self._libreelec_image_prefix(info) if compatible_only else ""
         client = self._ssh_client("install")
         try:
             command = (
@@ -3423,10 +3429,11 @@ class TransferApp(tk.Tk):
                 raise TransferError(f"Stored TAR files could not be listed: {err}")
         finally:
             client.close()
-        return sorted(
-            [name.strip() for name in out.splitlines() if name.strip().startswith(prefix)],
-            reverse=True,
-        )
+
+        names = [name.strip() for name in out.splitlines() if name.strip()]
+        if compatible_only:
+            names = [name for name in names if name.startswith(prefix)]
+        return sorted(names, reverse=True)
 
     def _download_tar_to_libreelec(
         self,
@@ -3634,7 +3641,8 @@ class TransferApp(tk.Tk):
         labels = [entry["label"] for entry in entries]
         selected = self._choose_from_list(
             "TAR laden",
-            "Select a compatible TAR. It will only be downloaded and stored; no update will be activated.",
+            "Select any available version for this LibreELEC hardware platform. "
+            "It will only be downloaded and stored; no update will be activated.",
             labels,
         )
         if not selected:
@@ -3671,9 +3679,9 @@ class TransferApp(tk.Tk):
         info = self._inspect_install_device()
         if info["platform"] != "libreelec":
             raise TransferError("TAR activation is available only for LibreELEC.")
-        names = self._remote_tar_names(LIBREELEC_TAR_DIR, info)
+        names = self._remote_tar_names(LIBREELEC_TAR_DIR, info, compatible_only=False)
         if not names:
-            raise TransferError("No compatible downloaded TAR is stored on this LibreELEC device.")
+            raise TransferError("No downloaded TAR is stored on this LibreELEC device.")
         filename = (
             names[0]
             if len(names) == 1
@@ -3683,6 +3691,18 @@ class TransferApp(tk.Tk):
         )
         if not filename:
             raise TransferError("TAR activation was cancelled.")
+
+        expected_prefix = self._libreelec_image_prefix(info)
+        if not filename.startswith(expected_prefix):
+            if not self._ask_yes_no(
+                "LibreELEC platform warning",
+                f"The selected TAR does not match the detected hardware platform.\n\n"
+                f"Detected: {expected_prefix}*\n"
+                f"Selected: {filename}\n\n"
+                "You can still activate it. Continue anyway?",
+            ):
+                raise TransferError("TAR activation was cancelled.")
+
         if not self._ask_yes_no(
             "TAR als Update aktivieren",
             f"Copy this stored TAR to /storage/.update/?\n\n{filename}",
