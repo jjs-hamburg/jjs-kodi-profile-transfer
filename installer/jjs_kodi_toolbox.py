@@ -58,7 +58,7 @@ except ImportError:
 
 
 APP_TITLE = "JJS KODI Toolbox"
-APP_VERSION = "1.22"
+APP_VERSION = "1.23"
 META_NAME = "JJS_PROFILE_TRANSFER.json"
 
 DEFAULT_ADB_PORT = 5555
@@ -1632,15 +1632,51 @@ class TransferApp(tk.Tk):
         done = threading.Event()
         answer = {"value": False}
 
-        def ask() -> None:
-            try:
-                answer["value"] = bool(messagebox.askyesno(title, message, parent=self))
-            finally:
+        def show() -> None:
+            dialog = tk.Toplevel(self)
+            dialog.withdraw()
+            dialog.title(title)
+            dialog.transient(self)
+            dialog.resizable(False, False)
+
+            body = ttk.Frame(dialog, padding=18)
+            body.pack(fill="both", expand=True)
+            ttk.Label(
+                body,
+                text=message,
+                justify="left",
+                wraplength=520,
+            ).pack(anchor="w")
+
+            buttons = ttk.Frame(body)
+            buttons.pack(fill="x", pady=(18, 0))
+
+            def finish(value: bool) -> None:
+                answer["value"] = value
+                try:
+                    dialog.grab_release()
+                except Exception:
+                    pass
+                dialog.destroy()
                 done.set()
 
-        self.after(0, ask)
+            ttk.Button(buttons, text="Nein", width=10, command=lambda: finish(False)).pack(
+                side="right"
+            )
+            ttk.Button(buttons, text="Ja", width=10, command=lambda: finish(True)).pack(
+                side="right", padx=(0, 8)
+            )
+
+            dialog.protocol("WM_DELETE_WINDOW", lambda: finish(False))
+            self._center_child_on_main(dialog)
+            dialog.deiconify()
+            dialog.lift()
+            dialog.grab_set()
+            dialog.focus_force()
+
+        self.after(0, show)
         done.wait()
-        return answer["value"]
+        return bool(answer["value"])
 
     def _choose_from_list(self, title: str, message: str, choices: list[str]) -> str | None:
         if not choices:
@@ -3446,7 +3482,7 @@ class TransferApp(tk.Tk):
         remote_final = f"{destination_dir}/{filename}"
         remote_temp = f"{destination_dir}/.jjs-download-{int(time.time())}.tmp"
         try:
-            self._set_progress(20, "Preparing download")
+            self._set_progress(20, f"Downloading {filename} …")
             command = (
                 f"mkdir -p {shlex.quote(destination_dir)} && "
                 f"rm -f {shlex.quote(remote_temp)} && "
@@ -3563,37 +3599,77 @@ class TransferApp(tk.Tk):
         if info["platform"] != "libreelec":
             raise TransferError("Rollback is available only for LibreELEC.")
 
-        version_text = info.get("libreelec_version", "") or info.get("device", "")
-        match = re.search(r"\d+\.\d+(?:\.\d+)?", version_text)
-        if not match:
-            raise TransferError("Installed LibreELEC base version could not be determined.")
-        version = match.group(0)
-        filename = f"{self._libreelec_image_prefix(info)}{version}.tar"
-        official = [
-            item
-            for item in self._network_libreelec_tars(info)
-            if item["label"].startswith("[LibreELEC] ") and item["name"] == filename
-        ]
-        if not official:
-            raise TransferError(
-                f"The matching official LibreELEC rollback TAR was not found: {filename}"
-            )
-        entry = official[0]
-        url = entry["url"]
-        expected = entry.get("sha256", "")
-        if not re.fullmatch(r"[0-9a-f]{64}", expected):
-            raise TransferError("Official LibreELEC catalog contains no valid SHA256 for rollback.")
+        version = str(info.get("libreelec_version", "")).strip()
+        if not version:
+            raise TransferError("The exact installed LibreELEC version could not be determined.")
+
+        prefix = self._libreelec_image_prefix(info)
+        filename = f"{prefix}{safe_filename_part(version)}-rollback.tar"
+        topdir = filename[:-4]
+        remote_final = f"{LIBREELEC_ROLLBACK_DIR}/{filename}"
+        remote_sha = remote_final + ".sha256"
+        build_root = f"{LIBREELEC_ROLLBACK_DIR}/.build-{int(time.time())}"
+        release_root = f"{build_root}/{topdir}"
+        target_root = f"{release_root}/target"
 
         if not self._ask_yes_no(
             "Rollback erstellen",
-            f"Official rollback TAR:\n{filename}\n\n"
-            f"Store it on {info['device']} under:\n{LIBREELEC_ROLLBACK_DIR}\n\nContinue?",
+            f"Create a rollback of the CURRENT installed LibreELEC system?\n\n"
+            f"Installed: {version}\n"
+            f"Platform: {prefix.removeprefix('LibreELEC-').removesuffix('-')}\n\n"
+            f"Rollback TAR:\n{remote_final}\n\n"
+            "No network download is used.",
         ):
             raise TransferError("Rollback creation was cancelled.")
 
-        remote, actual = self._download_tar_to_libreelec(
-            url, filename, LIBREELEC_ROLLBACK_DIR, expected
-        )
+        client = self._ssh_client("install")
+        try:
+            self._set_progress(12, "Checking current LibreELEC system")
+            check = (
+                "test -f /flash/KERNEL && test -f /flash/SYSTEM && "
+                "test -r /flash/KERNEL && test -r /flash/SYSTEM"
+            )
+            code, _, err = self._ssh_exec(client, check, timeout=30)
+            if code != 0:
+                raise TransferError(
+                    "Current LibreELEC KERNEL/SYSTEM could not be read from /flash. "
+                    + (err.strip() if err.strip() else "")
+                )
+
+            self._set_progress(25, f"Creating rollback {filename} …")
+            command = (
+                f"rm -rf {shlex.quote(build_root)} && "
+                f"mkdir -p {shlex.quote(target_root)} {shlex.quote(LIBREELEC_ROLLBACK_DIR)} && "
+                f"cp /flash/KERNEL {shlex.quote(target_root + '/KERNEL')} && "
+                f"cp /flash/SYSTEM {shlex.quote(target_root + '/SYSTEM')} && "
+                f"cd {shlex.quote(release_root)} && "
+                "md5sum -t target/KERNEL > target/KERNEL.md5 && "
+                "md5sum -t target/SYSTEM > target/SYSTEM.md5 && "
+                f"tar cf {shlex.quote(remote_final)} -C {shlex.quote(build_root)} {shlex.quote(topdir)} && "
+                f"sha256sum {shlex.quote(remote_final)} > {shlex.quote(remote_sha)} && "
+                f"rm -rf {shlex.quote(build_root)}"
+            )
+            code, _, err = self._ssh_exec(client, command, timeout=1800)
+            if code != 0:
+                self._ssh_exec(client, f"rm -rf {shlex.quote(build_root)}", timeout=30)
+                raise TransferError(f"Rollback TAR creation failed: {err or 'remote command failed'}")
+
+            self._set_progress(88, "Verifying rollback TAR")
+            verify = (
+                f"tar tf {shlex.quote(remote_final)} | grep -q '/target/KERNEL$' && "
+                f"tar tf {shlex.quote(remote_final)} | grep -q '/target/SYSTEM$' && "
+                f"tar tf {shlex.quote(remote_final)} | grep -q '/target/KERNEL.md5$' && "
+                f"tar tf {shlex.quote(remote_final)} | grep -q '/target/SYSTEM.md5$' && "
+                f"sha256sum {shlex.quote(remote_final)} | awk '{{print $1}}'"
+            )
+            code, actual, err = self._ssh_exec(client, verify, timeout=180)
+            actual = actual.strip().lower()
+            if code != 0 or not re.fullmatch(r"[0-9a-f]{64}", actual):
+                raise TransferError(f"Rollback TAR verification failed: {err}")
+        finally:
+            client.close()
+
+        self._set_progress(95, "Rollback ready")
         self._set_status("install", f"Rollback ready: {filename}")
         self._ui_queue.put(
             (
@@ -3601,7 +3677,8 @@ class TransferApp(tk.Tk):
                 (
                     "info",
                     APP_TITLE,
-                    f"Rollback stored on LibreELEC:\n{remote}\n\nSHA256: {actual}",
+                    f"Rollback of the current LibreELEC system created:\n{remote_final}\n\n"
+                    f"Installed version: {version}\nSHA256: {actual}",
                 ),
             )
         )
