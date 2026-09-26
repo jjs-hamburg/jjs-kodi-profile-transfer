@@ -2,7 +2,7 @@
 
 Windows toolbox for managing Kodi on **Android / NVIDIA Shield (ADB)** and **LibreELEC (SSH)**.
 
-Current version: **1.14**
+Current version: **1.21**
 
 ## What it does
 
@@ -21,6 +21,9 @@ Current version: **1.14**
   - Android: detect multiple Kodi installations and uninstall a selected one
   - Fresh Android installs: configure microphone and "All files" access where supported
   - LibreELEC: upload a local update TAR to `/storage/.update/` and optionally reboot
+  - LibreELEC: create and restore an official rollback TAR stored on the LibreELEC device itself
+  - LibreELEC: browse compatible official/JJS TAR releases and download them to `/storage/.jjs-kodi-toolbox/tars/` without activating an update
+  - LibreELEC: activate a previously downloaded TAR separately by copying it to `/storage/.update/`
 
 - **Back up / restore Kodi databases**
   - MusicDB and VideoDB independently
@@ -64,7 +67,7 @@ Current version: **1.14**
 
 Get the current Windows build from:
 
-**Releases → JJS KODI Toolbox 1.14**
+**Releases → JJS KODI Toolbox 1.21**
 
 Files:
 

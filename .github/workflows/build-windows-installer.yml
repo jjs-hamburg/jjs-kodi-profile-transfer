@@ -47,7 +47,7 @@ jobs:
         run: |
           python -m py_compile installer/jjs_kodi_toolbox.py installer/jjs_kodi_database.py
           python -c "from pathlib import Path; s=Path(\'installer/jjs_kodi_toolbox.py\').read_text(encoding=\'utf-8\'); assert r\'\\n            command =\' not in s, \'literal escaped newline found\'"
-          python -c "import installer.jjs_kodi_toolbox as m; assert m.APP_VERSION == '1.20'; assert m.Image is not None; assert m.kodi_db.pymysql is not None; print(m.APP_TITLE, m.APP_VERSION)"
+          python -c "import installer.jjs_kodi_toolbox as m; assert m.APP_VERSION == '1.21'; assert m.Image is not None; assert m.kodi_db.pymysql is not None; print(m.APP_TITLE, m.APP_VERSION)"
           python -c "from installer import jjs_kodi_database as d; assert d.BACKUP_FORMAT_VERSION == 2; assert d.MAGIC['music'] == 'JJS_MUSIC_DB_BACKUP'; assert d.MAGIC['video'] == 'JJS_VIDEO_DB_BACKUP'; print('Database backup format OK')"
           python -c "from pathlib import Path; s=Path('installer/jjs_kodi_toolbox.py').read_text(encoding='utf-8'); assert 'MariaDB server' in s; assert 'database_password' not in s[s.index('def _save_config'):s.index('# ---------- UI ----------')]; assert 'def _direct_database_config' in s; print('Direct MariaDB mode OK')"
           python -c "from pathlib import Path; s=Path('installer/jjs_kodi_toolbox.py').read_text(encoding='utf-8'); a=s[s.index('    def _database_restore(self, kind: str) -> None:'):s.index('    # ---------- endpoint discovery ----------')]; assert 'context = self._database_config(info, kind)' in a; assert 'resolve_mariadb_restore_target' in a; assert a.index('resolve_mariadb_restore_target') < a.index('context = self._database_describe(info, kind)'); print('Disaster-safe MariaDB restore preflight OK')"
@@ -109,6 +109,7 @@ jobs:
           python -c "import installer.jjs_kodi_toolbox as m; assert m.normalize_windows_unc_path('//MEDIA-NAS/mce/test.tar') == r'\\MEDIA-NAS\mce\test.tar'; assert m.replace_unc_server('//MEDIA-NAS/mce/test.tar', '192.0.2.10') == r'\\192.0.2.10\mce\test.tar'; print('UNC normalization/fallback OK')"
           python -c "from pathlib import Path; s=Path('installer/jjs_kodi_toolbox.py').read_text(encoding='utf-8'); assert 'same platform - full restore' in s; assert 'Preserved target Addons*.db' in s; assert 'binary addon settings' in s; print('Cross-platform addon policy OK')"
           python -c "from pathlib import Path; s=Path('installer/jjs_kodi_toolbox.py').read_text(encoding='utf-8'); assert 'def _install_android_apk' in s; assert 'def _uninstall_android_kodi' in s; assert '/storage/.update/' in s; assert 'The existing app was NOT uninstalled.' in s; print('Install/update safety paths OK')"
+          python -c "from pathlib import Path; s=Path('installer/jjs_kodi_toolbox.py').read_text(encoding='utf-8'); assert 'def _create_libreelec_rollback' in s; assert 'def _restore_libreelec_rollback' in s; assert 'def _load_libreelec_tar_from_network' in s; assert 'def _activate_loaded_libreelec_tar' in s; assert '/storage/.jjs-kodi-toolbox/rollback' in s; assert '/storage/.jjs-kodi-toolbox/tars' in s; print('LibreELEC rollback/TAR paths OK')"
           python -c "from pathlib import Path; s=Path('installer/jjs_kodi_toolbox.py').read_text(encoding='utf-8'); assert 'def _build_screenshot_tab' in s; assert 'def _take_android_screenshot' in s; assert 'screencap' in s; assert 'TakeScreenshot({remote},sync)' in s; assert 'Temporary LibreELEC screenshot removed.' in s; print('Screenshot paths OK')"
 
       - name: Build single EXE
@@ -148,9 +149,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "v1.20"
-          $title = "JJS KODI Toolbox 1.20"
-          $notes = "Adds MusicDB and VideoDB backup/restore for MariaDB and local SQLite using the existing JJS Music Library Manager ZIP backup format. MariaDB restores now use fast per-table transactions with resilient row-level fallback. MariaDB can use Source A's advancedsettings.xml or connect directly to a DB server; the direct-server password is not stored. Existing profile, install/update and screenshot functions remain unchanged."
+          $tag = "v1.21"
+          $title = "JJS KODI Toolbox 1.21"
+          $notes = "Adds LibreELEC on-device rollback management and staged network TAR handling. Rollback erstellen downloads and verifies the matching official LibreELEC TAR to the target device; Rollback zurückspielen activates a stored rollback. TAR laden and TAR als Update aktivieren are deliberately separate: a TAR can be stored on the LibreELEC device without changing the running system and activated later. No automatic profile backup is created."
 
           if (gh release view $tag 2>$null) {
             gh release upload $tag dist/JJS-KODI-Toolbox.exe dist/SHA256SUMS.txt --clobber
