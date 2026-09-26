@@ -3599,37 +3599,77 @@ class TransferApp(tk.Tk):
         if info["platform"] != "libreelec":
             raise TransferError("Rollback is available only for LibreELEC.")
 
-        version_text = info.get("libreelec_version", "") or info.get("device", "")
-        match = re.search(r"\d+\.\d+(?:\.\d+)?", version_text)
-        if not match:
-            raise TransferError("Installed LibreELEC base version could not be determined.")
-        version = match.group(0)
-        filename = f"{self._libreelec_image_prefix(info)}{version}.tar"
-        official = [
-            item
-            for item in self._network_libreelec_tars(info)
-            if item["label"].startswith("[LibreELEC] ") and item["name"] == filename
-        ]
-        if not official:
-            raise TransferError(
-                f"The matching official LibreELEC rollback TAR was not found: {filename}"
-            )
-        entry = official[0]
-        url = entry["url"]
-        expected = entry.get("sha256", "")
-        if not re.fullmatch(r"[0-9a-f]{64}", expected):
-            raise TransferError("Official LibreELEC catalog contains no valid SHA256 for rollback.")
+        version = str(info.get("libreelec_version", "")).strip()
+        if not version:
+            raise TransferError("The exact installed LibreELEC version could not be determined.")
+
+        prefix = self._libreelec_image_prefix(info)
+        filename = f"{prefix}{safe_filename_part(version)}-rollback.tar"
+        topdir = filename[:-4]
+        remote_final = f"{LIBREELEC_ROLLBACK_DIR}/{filename}"
+        remote_sha = remote_final + ".sha256"
+        build_root = f"{LIBREELEC_ROLLBACK_DIR}/.build-{int(time.time())}"
+        release_root = f"{build_root}/{topdir}"
+        target_root = f"{release_root}/target"
 
         if not self._ask_yes_no(
             "Rollback erstellen",
-            f"Official rollback TAR:\n{filename}\n\n"
-            f"Store it on {info['device']} under:\n{LIBREELEC_ROLLBACK_DIR}\n\nContinue?",
+            f"Create a rollback of the CURRENT installed LibreELEC system?\n\n"
+            f"Installed: {version}\n"
+            f"Platform: {prefix.removeprefix('LibreELEC-').removesuffix('-')}\n\n"
+            f"Rollback TAR:\n{remote_final}\n\n"
+            "No network download is used.",
         ):
             raise TransferError("Rollback creation was cancelled.")
 
-        remote, actual = self._download_tar_to_libreelec(
-            url, filename, LIBREELEC_ROLLBACK_DIR, expected
-        )
+        client = self._ssh_client("install")
+        try:
+            self._set_progress(12, "Checking current LibreELEC system")
+            check = (
+                "test -f /flash/KERNEL && test -f /flash/SYSTEM && "
+                "test -r /flash/KERNEL && test -r /flash/SYSTEM"
+            )
+            code, _, err = self._ssh_exec(client, check, timeout=30)
+            if code != 0:
+                raise TransferError(
+                    "Current LibreELEC KERNEL/SYSTEM could not be read from /flash. "
+                    + (err.strip() if err.strip() else "")
+                )
+
+            self._set_progress(25, f"Creating rollback {filename} …")
+            command = (
+                f"rm -rf {shlex.quote(build_root)} && "
+                f"mkdir -p {shlex.quote(target_root)} {shlex.quote(LIBREELEC_ROLLBACK_DIR)} && "
+                f"cp /flash/KERNEL {shlex.quote(target_root + '/KERNEL')} && "
+                f"cp /flash/SYSTEM {shlex.quote(target_root + '/SYSTEM')} && "
+                f"cd {shlex.quote(release_root)} && "
+                "md5sum -t target/KERNEL > target/KERNEL.md5 && "
+                "md5sum -t target/SYSTEM > target/SYSTEM.md5 && "
+                f"tar cf {shlex.quote(remote_final)} -C {shlex.quote(build_root)} {shlex.quote(topdir)} && "
+                f"sha256sum {shlex.quote(remote_final)} > {shlex.quote(remote_sha)} && "
+                f"rm -rf {shlex.quote(build_root)}"
+            )
+            code, _, err = self._ssh_exec(client, command, timeout=1800)
+            if code != 0:
+                self._ssh_exec(client, f"rm -rf {shlex.quote(build_root)}", timeout=30)
+                raise TransferError(f"Rollback TAR creation failed: {err or 'remote command failed'}")
+
+            self._set_progress(88, "Verifying rollback TAR")
+            verify = (
+                f"tar tf {shlex.quote(remote_final)} | grep -q '/target/KERNEL$' && "
+                f"tar tf {shlex.quote(remote_final)} | grep -q '/target/SYSTEM$' && "
+                f"tar tf {shlex.quote(remote_final)} | grep -q '/target/KERNEL.md5$' && "
+                f"tar tf {shlex.quote(remote_final)} | grep -q '/target/SYSTEM.md5$' && "
+                f"sha256sum {shlex.quote(remote_final)} | awk '{{print $1}}'"
+            )
+            code, actual, err = self._ssh_exec(client, verify, timeout=180)
+            actual = actual.strip().lower()
+            if code != 0 or not re.fullmatch(r"[0-9a-f]{64}", actual):
+                raise TransferError(f"Rollback TAR verification failed: {err}")
+        finally:
+            client.close()
+
+        self._set_progress(95, "Rollback ready")
         self._set_status("install", f"Rollback ready: {filename}")
         self._ui_queue.put(
             (
@@ -3637,7 +3677,8 @@ class TransferApp(tk.Tk):
                 (
                     "info",
                     APP_TITLE,
-                    f"Rollback stored on LibreELEC:\n{remote}\n\nSHA256: {actual}",
+                    f"Rollback of the current LibreELEC system created:\n{remote_final}\n\n"
+                    f"Installed version: {version}\nSHA256: {actual}",
                 ),
             )
         )
