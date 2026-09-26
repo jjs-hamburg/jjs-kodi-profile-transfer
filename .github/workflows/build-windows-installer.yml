@@ -47,7 +47,7 @@ jobs:
         run: |
           python -m py_compile installer/jjs_kodi_toolbox.py installer/jjs_kodi_database.py
           python -c "from pathlib import Path; s=Path(\'installer/jjs_kodi_toolbox.py\').read_text(encoding=\'utf-8\'); assert r\'\\n            command =\' not in s, \'literal escaped newline found\'"
-          python -c "import installer.jjs_kodi_toolbox as m; assert m.APP_VERSION == '1.23'; assert m.Image is not None; assert m.kodi_db.pymysql is not None; print(m.APP_TITLE, m.APP_VERSION)"
+          python -c "import installer.jjs_kodi_toolbox as m; assert m.APP_VERSION == '1.24'; assert m.Image is not None; assert m.kodi_db.pymysql is not None; print(m.APP_TITLE, m.APP_VERSION)"
           python -c "from installer import jjs_kodi_database as d; assert d.BACKUP_FORMAT_VERSION == 2; assert d.MAGIC['music'] == 'JJS_MUSIC_DB_BACKUP'; assert d.MAGIC['video'] == 'JJS_VIDEO_DB_BACKUP'; print('Database backup format OK')"
           python -c "from pathlib import Path; s=Path('installer/jjs_kodi_toolbox.py').read_text(encoding='utf-8'); assert 'MariaDB server' in s; assert 'database_password' not in s[s.index('def _save_config'):s.index('# ---------- UI ----------')]; assert 'def _direct_database_config' in s; print('Direct MariaDB mode OK')"
           python -c "from pathlib import Path; s=Path('installer/jjs_kodi_toolbox.py').read_text(encoding='utf-8'); a=s[s.index('    def _database_restore(self, kind: str) -> None:'):s.index('    # ---------- endpoint discovery ----------')]; assert 'context = self._database_config(info, kind)' in a; assert 'resolve_mariadb_restore_target' in a; assert a.index('resolve_mariadb_restore_target') < a.index('context = self._database_describe(info, kind)'); print('Disaster-safe MariaDB restore preflight OK')"
@@ -153,9 +153,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "v1.23"
-          $title = "JJS KODI Toolbox 1.23"
-          $notes = "Centers Toolbox confirmation dialogs on the main window, shows the exact LibreELEC TAR filename while downloading, and fixes Rollback erstellen so it packages the currently installed /flash/KERNEL and /flash/SYSTEM instead of downloading a substitute image. TAR laden remains the path for choosing other LibreELEC versions."
+          $tag = "v1.24"
+          $title = "JJS KODI Toolbox 1.24"
+          $notes = "Uses English-only labels and confirmation buttons throughout the LibreELEC rollback and TAR workflow. No functional behavior changed."
 
           if (gh release view $tag 2>$null) {
             gh release upload $tag dist/JJS-KODI-Toolbox.exe dist/SHA256SUMS.txt --clobber
