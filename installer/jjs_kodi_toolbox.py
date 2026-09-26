@@ -58,7 +58,7 @@ except ImportError:
 
 
 APP_TITLE = "JJS KODI Toolbox"
-APP_VERSION = "1.22"
+APP_VERSION = "1.23"
 META_NAME = "JJS_PROFILE_TRANSFER.json"
 
 DEFAULT_ADB_PORT = 5555
@@ -1632,15 +1632,51 @@ class TransferApp(tk.Tk):
         done = threading.Event()
         answer = {"value": False}
 
-        def ask() -> None:
-            try:
-                answer["value"] = bool(messagebox.askyesno(title, message, parent=self))
-            finally:
+        def show() -> None:
+            dialog = tk.Toplevel(self)
+            dialog.withdraw()
+            dialog.title(title)
+            dialog.transient(self)
+            dialog.resizable(False, False)
+
+            body = ttk.Frame(dialog, padding=18)
+            body.pack(fill="both", expand=True)
+            ttk.Label(
+                body,
+                text=message,
+                justify="left",
+                wraplength=520,
+            ).pack(anchor="w")
+
+            buttons = ttk.Frame(body)
+            buttons.pack(fill="x", pady=(18, 0))
+
+            def finish(value: bool) -> None:
+                answer["value"] = value
+                try:
+                    dialog.grab_release()
+                except Exception:
+                    pass
+                dialog.destroy()
                 done.set()
 
-        self.after(0, ask)
+            ttk.Button(buttons, text="Nein", width=10, command=lambda: finish(False)).pack(
+                side="right"
+            )
+            ttk.Button(buttons, text="Ja", width=10, command=lambda: finish(True)).pack(
+                side="right", padx=(0, 8)
+            )
+
+            dialog.protocol("WM_DELETE_WINDOW", lambda: finish(False))
+            self._center_child_on_main(dialog)
+            dialog.deiconify()
+            dialog.lift()
+            dialog.grab_set()
+            dialog.focus_force()
+
+        self.after(0, show)
         done.wait()
-        return answer["value"]
+        return bool(answer["value"])
 
     def _choose_from_list(self, title: str, message: str, choices: list[str]) -> str | None:
         if not choices:
@@ -3446,7 +3482,7 @@ class TransferApp(tk.Tk):
         remote_final = f"{destination_dir}/{filename}"
         remote_temp = f"{destination_dir}/.jjs-download-{int(time.time())}.tmp"
         try:
-            self._set_progress(20, "Preparing download")
+            self._set_progress(20, "Downloading TAR on LibreELEC …")
             command = (
                 f"mkdir -p {shlex.quote(destination_dir)} && "
                 f"rm -f {shlex.quote(remote_temp)} && "
