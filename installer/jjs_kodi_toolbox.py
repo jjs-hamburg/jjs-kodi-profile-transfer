@@ -488,7 +488,7 @@ class TransferApp(tk.Tk):
             actions,
             text="Create rollback",
             command=lambda: self._start_worker(
-                self._create_libreelec_rollback, "install", "LibreELEC rollback erstellen"
+                self._create_libreelec_rollback, "install", "Create LibreELEC rollback"
             ),
         )
         self.rollback_create_button.pack(side="left", padx=(0, 8))
