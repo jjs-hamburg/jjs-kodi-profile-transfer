@@ -3413,8 +3413,10 @@ class TransferApp(tk.Tk):
 
         return sorted(entries.values(), key=lambda item: item["label"], reverse=True)
 
-    def _remote_tar_names(self, directory: str, info: dict) -> list[str]:
-        prefix = self._libreelec_image_prefix(info)
+    def _remote_tar_names(
+        self, directory: str, info: dict, compatible_only: bool = True
+    ) -> list[str]:
+        prefix = self._libreelec_image_prefix(info) if compatible_only else ""
         client = self._ssh_client("install")
         try:
             command = (
@@ -3427,10 +3429,11 @@ class TransferApp(tk.Tk):
                 raise TransferError(f"Stored TAR files could not be listed: {err}")
         finally:
             client.close()
-        return sorted(
-            [name.strip() for name in out.splitlines() if name.strip().startswith(prefix)],
-            reverse=True,
-        )
+
+        names = [name.strip() for name in out.splitlines() if name.strip()]
+        if compatible_only:
+            names = [name for name in names if name.startswith(prefix)]
+        return sorted(names, reverse=True)
 
     def _download_tar_to_libreelec(
         self,
@@ -3638,7 +3641,8 @@ class TransferApp(tk.Tk):
         labels = [entry["label"] for entry in entries]
         selected = self._choose_from_list(
             "TAR laden",
-            "Select a compatible TAR. It will only be downloaded and stored; no update will be activated.",
+            "Select any available version for this LibreELEC hardware platform. "
+            "It will only be downloaded and stored; no update will be activated.",
             labels,
         )
         if not selected:
@@ -3675,9 +3679,9 @@ class TransferApp(tk.Tk):
         info = self._inspect_install_device()
         if info["platform"] != "libreelec":
             raise TransferError("TAR activation is available only for LibreELEC.")
-        names = self._remote_tar_names(LIBREELEC_TAR_DIR, info)
+        names = self._remote_tar_names(LIBREELEC_TAR_DIR, info, compatible_only=False)
         if not names:
-            raise TransferError("No compatible downloaded TAR is stored on this LibreELEC device.")
+            raise TransferError("No downloaded TAR is stored on this LibreELEC device.")
         filename = (
             names[0]
             if len(names) == 1
@@ -3687,6 +3691,18 @@ class TransferApp(tk.Tk):
         )
         if not filename:
             raise TransferError("TAR activation was cancelled.")
+
+        expected_prefix = self._libreelec_image_prefix(info)
+        if not filename.startswith(expected_prefix):
+            if not self._ask_yes_no(
+                "LibreELEC platform warning",
+                f"The selected TAR does not match the detected hardware platform.\n\n"
+                f"Detected: {expected_prefix}*\n"
+                f"Selected: {filename}\n\n"
+                "You can still activate it. Continue anyway?",
+            ):
+                raise TransferError("TAR activation was cancelled.")
+
         if not self._ask_yes_no(
             "TAR als Update aktivieren",
             f"Copy this stored TAR to /storage/.update/?\n\n{filename}",
